@@ -86,6 +86,9 @@ pub fn background_executor() -> BackgroundExecutor {
     current_platform(true).background_executor()
 }
 
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub use linux::window::{Anchor, KeyboardInteractivity, Layer, LayerShellSettings};
+
 #[cfg(target_os = "macos")]
 pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
     Rc::new(MacPlatform::new(headless))
@@ -1162,7 +1165,7 @@ pub struct TitlebarOptions {
 }
 
 /// The kind of window to create
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowKind {
     /// A normal application window
     Normal,
@@ -1170,6 +1173,11 @@ pub enum WindowKind {
     /// A window that appears above all other windows, usually used for alerts or popups
     /// use sparingly!
     PopUp,
+
+    /// A window that is layers of the desktop, wayland only
+    #[cfg(target_os = "linux")]
+    #[cfg(feature = "wayland")]
+    LayerShell(LayerShellSettings),
 }
 
 /// The appearance of the window, as defined by the operating system.
