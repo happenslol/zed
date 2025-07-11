@@ -31,7 +31,7 @@ use crate::llm::{AGENT_EXTENDED_TRIAL_FEATURE_FLAG, DEFAULT_MAX_MONTHLY_SPEND};
 use crate::rpc::{ResultExt as _, Server};
 use crate::stripe_client::{
     StripeCancellationDetailsReason, StripeClient, StripeCustomerId, StripeSubscription,
-    StripeSubscriptionId,
+    StripeSubscriptionId, UpdateCustomerParams,
 };
 use crate::{AppState, Error, Result};
 use crate::{db::UserId, llm::db::LlmDatabase};
@@ -353,7 +353,17 @@ async fn create_billing_subscription(
     }
 
     let customer_id = if let Some(existing_customer) = &existing_billing_customer {
-        StripeCustomerId(existing_customer.stripe_customer_id.clone().into())
+        let customer_id = StripeCustomerId(existing_customer.stripe_customer_id.clone().into());
+        if let Some(email) = user.email_address.as_deref() {
+            stripe_billing
+                .client()
+                .update_customer(&customer_id, UpdateCustomerParams { email: Some(email) })
+                .await
+                // Update of email address is best-effort - continue checkout even if it fails
+                .context("error updating stripe customer email address")
+                .log_err();
+        }
+        customer_id
     } else {
         stripe_billing
             .find_or_create_customer_by_email(user.email_address.as_deref())
@@ -1394,6 +1404,9 @@ async fn sync_model_request_usage_with_stripe(
     llm_db: &Arc<LlmDatabase>,
     stripe_billing: &Arc<StripeBilling>,
 ) -> anyhow::Result<()> {
+    log::info!("Stripe usage sync: Starting");
+    let started_at = Utc::now();
+
     let staff_users = app.db.get_staff_users().await?;
     let staff_user_ids = staff_users
         .iter()
@@ -1437,6 +1450,10 @@ async fn sync_model_request_usage_with_stripe(
     let claude_3_7_sonnet_max = stripe_billing
         .find_price_by_lookup_key("claude-3-7-sonnet-requests-max")
         .await?;
+
+    let usage_meter_count = usage_meters.len();
+
+    log::info!("Stripe usage sync: Syncing {usage_meter_count} usage meters");
 
     for (usage_meter, usage) in usage_meters {
         maybe!(async {
@@ -1493,6 +1510,11 @@ async fn sync_model_request_usage_with_stripe(
         .await
         .log_err();
     }
+
+    log::info!(
+        "Stripe usage sync: Synced {usage_meter_count} usage meters in {:?}",
+        Utc::now() - started_at
+    );
 
     Ok(())
 }

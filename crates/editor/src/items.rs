@@ -2,6 +2,7 @@ use crate::{
     Anchor, Autoscroll, Editor, EditorEvent, EditorSettings, ExcerptId, ExcerptRange, FormatTarget,
     MultiBuffer, MultiBufferSnapshot, NavigationData, SearchWithinRange, SelectionEffects,
     ToPoint as _,
+    display_map::HighlightKey,
     editor_settings::SeedQuerySetting,
     persistence::{DB, SerializedEditor},
     scroll::ScrollAnchor,
@@ -777,7 +778,7 @@ impl Item for Editor {
 
     fn deactivated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let selection = self.selections.newest_anchor();
-        self.push_to_nav_history(selection.head(), None, true, cx);
+        self.push_to_nav_history(selection.head(), None, true, false, cx);
     }
 
     fn workspace_deactivated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -812,7 +813,13 @@ impl Item for Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        self.report_editor_event("Editor Saved", None, cx);
+        // Add meta data tracking # of auto saves
+        if options.autosave {
+            self.report_editor_event("Editor Autosaved", None, cx);
+        } else {
+            self.report_editor_event("Editor Saved", None, cx);
+        }
+
         let buffers = self.buffer().clone().read(cx).all_buffers();
         let buffers = buffers
             .into_iter()
@@ -1351,7 +1358,7 @@ impl ProjectItem for Editor {
                         cx,
                     );
                     if !restoration_data.selections.is_empty() {
-                        editor.change_selections(None, window, cx, |s| {
+                        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
                             s.select_ranges(clip_ranges(&restoration_data.selections, &snapshot));
                         });
                     }
@@ -1431,7 +1438,7 @@ impl SearchableItem for Editor {
 
     fn get_matches(&self, _window: &mut Window, _: &mut App) -> Vec<Range<Anchor>> {
         self.background_highlights
-            .get(&TypeId::of::<BufferSearchHighlights>())
+            .get(&HighlightKey::Type(TypeId::of::<BufferSearchHighlights>()))
             .map_or(Vec::new(), |(_color, ranges)| {
                 ranges.iter().cloned().collect()
             })
@@ -1454,12 +1461,12 @@ impl SearchableItem for Editor {
     ) {
         let existing_range = self
             .background_highlights
-            .get(&TypeId::of::<BufferSearchHighlights>())
+            .get(&HighlightKey::Type(TypeId::of::<BufferSearchHighlights>()))
             .map(|(_, range)| range.as_ref());
         let updated = existing_range != Some(matches);
         self.highlight_background::<BufferSearchHighlights>(
             matches,
-            |theme| theme.search_match_background,
+            |theme| theme.colors().search_match_background,
             cx,
         );
         if updated {
@@ -1520,7 +1527,7 @@ impl SearchableItem for Editor {
     fn query_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> String {
         let setting = EditorSettings::get_global(cx).seed_search_query_from_cursor;
         let snapshot = &self.snapshot(window, cx).buffer_snapshot;
-        let selection = self.selections.newest::<usize>(cx);
+        let selection = self.selections.newest_adjusted(cx);
 
         match setting {
             SeedQuerySetting::Never => String::new(),
@@ -1557,7 +1564,7 @@ impl SearchableItem for Editor {
     ) {
         self.unfold_ranges(&[matches[index].clone()], false, true, cx);
         let range = self.range_for_match(&matches[index]);
-        self.change_selections(Some(Autoscroll::fit()), window, cx, |s| {
+        self.change_selections(Default::default(), window, cx, |s| {
             s.select_ranges([range]);
         })
     }
@@ -1569,7 +1576,7 @@ impl SearchableItem for Editor {
         cx: &mut Context<Self>,
     ) {
         self.unfold_ranges(matches, false, false, cx);
-        self.change_selections(None, window, cx, |s| {
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
             s.select_ranges(matches.iter().cloned())
         });
     }
@@ -1606,23 +1613,9 @@ impl SearchableItem for Editor {
         let text = self.buffer.read(cx);
         let text = text.snapshot(cx);
         let mut edits = vec![];
-        let mut last_point: Option<Point> = None;
 
         for m in matches {
-            let point = m.start.to_point(&text);
             let text = text.text_for_range(m.clone()).collect::<Vec<_>>();
-
-            // Check if the row for the current match is different from the last
-            // match. If that's not the case and we're still replacing matches
-            // in the same row/line, skip this match if the `one_match_per_line`
-            // option is enabled.
-            if last_point.is_none() {
-                last_point = Some(point);
-            } else if last_point.is_some() && point.row != last_point.unwrap().row {
-                last_point = Some(point);
-            } else if query.one_match_per_line().is_some_and(|enabled| enabled) {
-                continue;
-            }
 
             let text: Cow<_> = if text.len() == 1 {
                 text.first().cloned().unwrap().into()
@@ -1701,7 +1694,7 @@ impl SearchableItem for Editor {
         let buffer = self.buffer().read(cx).snapshot(cx);
         let search_within_ranges = self
             .background_highlights
-            .get(&TypeId::of::<SearchWithinRange>())
+            .get(&HighlightKey::Type(TypeId::of::<SearchWithinRange>()))
             .map_or(vec![], |(_color, ranges)| {
                 ranges.iter().cloned().collect::<Vec<_>>()
             });

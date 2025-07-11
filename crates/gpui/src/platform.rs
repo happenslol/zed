@@ -25,8 +25,14 @@ mod test;
 mod windows;
 
 #[cfg(all(
-    any(target_os = "linux", target_os = "freebsd"),
-    any(feature = "wayland", feature = "x11"),
+    feature = "screen-capture",
+    any(
+        target_os = "windows",
+        all(
+            any(target_os = "linux", target_os = "freebsd"),
+            any(feature = "wayland", feature = "x11"),
+        )
+    )
 ))]
 pub(crate) mod scap_screen_capture;
 
@@ -96,6 +102,9 @@ pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
+    #[cfg(feature = "x11")]
+    use anyhow::Context as _;
+
     if headless {
         return Rc::new(HeadlessClient::new());
     }
@@ -105,7 +114,11 @@ pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
         "Wayland" => Rc::new(WaylandClient::new()),
 
         #[cfg(feature = "x11")]
-        "X11" => Rc::new(X11Client::new()),
+        "X11" => Rc::new(
+            X11Client::new()
+                .context("Failed to initialize X11 client.")
+                .unwrap(),
+        ),
 
         "Headless" => Rc::new(HeadlessClient::new()),
         _ => unreachable!(),
@@ -147,7 +160,7 @@ pub fn guess_compositor() -> &'static str {
 pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
     Rc::new(
         WindowsPlatform::new()
-            .inspect_err(|err| show_error("Error: Zed failed to launch", err.to_string()))
+            .inspect_err(|err| show_error("Failed to launch", err.to_string()))
             .unwrap(),
     )
 }
@@ -172,10 +185,28 @@ pub(crate) trait Platform: 'static {
         None
     }
 
+    #[cfg(feature = "screen-capture")]
     fn is_screen_capture_supported(&self) -> bool;
+    #[cfg(not(feature = "screen-capture"))]
+    fn is_screen_capture_supported(&self) -> bool {
+        false
+    }
+    #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
     ) -> oneshot::Receiver<Result<Vec<Box<dyn ScreenCaptureSource>>>>;
+    #[cfg(not(feature = "screen-capture"))]
+    fn screen_capture_sources(
+        &self,
+    ) -> oneshot::Receiver<anyhow::Result<Vec<Box<dyn ScreenCaptureSource>>>> {
+        let (sources_tx, sources_rx) = oneshot::channel();
+        sources_tx
+            .send(Err(anyhow::anyhow!(
+                "gpui was compiled without the screen-capture feature"
+            )))
+            .ok();
+        sources_rx
+    }
 
     fn open_window(
         &self,
@@ -418,6 +449,7 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
     fn mouse_position(&self) -> Point<Pixels>;
     fn modifiers(&self) -> Modifiers;
+    fn capslock(&self) -> Capslock;
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler>;
     fn prompt(
@@ -765,7 +797,6 @@ pub(crate) struct AtlasTextureId {
 pub(crate) enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
-    Path = 2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

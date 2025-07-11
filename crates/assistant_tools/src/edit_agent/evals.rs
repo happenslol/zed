@@ -29,6 +29,7 @@ use std::{
     path::Path,
     str::FromStr,
     sync::mpsc,
+    time::Duration,
 };
 use util::path;
 
@@ -41,7 +42,7 @@ fn eval_extract_handle_command_output() {
     // ----------------------------|----------
     // claude-3.7-sonnet           |  0.99 (2025-06-14)
     // claude-sonnet-4             |  0.97 (2025-06-14)
-    // gemini-2.5-pro-06-05        |  0.77 (2025-05-22)
+    // gemini-2.5-pro-06-05        |  0.98 (2025-06-16)
     // gemini-2.5-flash            |  0.11 (2025-05-22)
     // gpt-4.1                     |  1.00 (2025-05-22)
 
@@ -59,7 +60,7 @@ fn eval_extract_handle_command_output() {
     let edit_description = "Extract `handle_command_output` method from `run_git_blame`.";
     eval(
         100,
-        0.7, // Taking the lower bar for Gemini
+        0.95,
         0.05,
         EvalInput::from_conversation(
             vec![
@@ -116,7 +117,7 @@ fn eval_delete_run_git_blame() {
     // ----------------------------|----------
     // claude-3.7-sonnet           | 1.0  (2025-06-14)
     // claude-sonnet-4             | 0.96 (2025-06-14)
-    // gemini-2.5-pro-06-05        |
+    // gemini-2.5-pro-06-05        | 1.0  (2025-06-16)
     // gemini-2.5-flash            |
     // gpt-4.1                     |
     let input_file_path = "root/blame.rs";
@@ -241,7 +242,7 @@ fn eval_use_wasi_sdk_in_compile_parser_to_wasm() {
     //
     //  claude-3.7-sonnet              |  0.96 (2025-06-14)
     //  claude-sonnet-4                |  0.11 (2025-06-14)
-    //  gemini-2.5-pro-preview-03-25   |  0.99 (2025-05-22)
+    //  gemini-2.5-pro-preview-latest  |  0.99 (2025-06-16)
     //  gemini-2.5-flash-preview-04-17 |
     //  gpt-4.1                        |
     let input_file_path = "root/lib.rs";
@@ -366,7 +367,7 @@ fn eval_disable_cursor_blinking() {
     //
     //  claude-3.7-sonnet              |  0.99 (2025-06-14)
     //  claude-sonnet-4                |  0.85 (2025-06-14)
-    //  gemini-2.5-pro-preview-03-25   |  1.0  (2025-05-22)
+    //  gemini-2.5-pro-preview-latest  |  0.97 (2025-06-16)
     //  gemini-2.5-flash-preview-04-17 |
     //  gpt-4.1                        |
     let input_file_path = "root/editor.rs";
@@ -453,12 +454,11 @@ fn eval_from_pixels_constructor() {
     // (e.g., at the beginning of the file), yet the evaluation may still
     // rate it highly.
     //
-    //  Model                          | Pass rate
-    // ============================================
-    //
-    //  claude-4.0-sonnet              |  0.99
-    //  claude-3.7-sonnet              |  0.88
-    //  gemini-2.5-pro-preview-03-25   |  0.96
+    //  Model                          | Date        | Pass rate
+    // =========================================================
+    //  claude-4.0-sonnet              | 2025-06-14  | 0.99
+    //  claude-3.7-sonnet              | 2025-06-14  | 0.88
+    //  gemini-2.5-pro-preview-06-05   | 2025-06-16  | 0.98
     //  gpt-4.1                        |
     let input_file_path = "root/canvas.rs";
     let input_file_content = include_str!("evals/fixtures/from_pixels_constructor/before.rs");
@@ -1263,6 +1263,7 @@ impl EvalAssertion {
                     content: vec![prompt.into()],
                     cache: false,
                 }],
+                thinking_allowed: true,
                 ..Default::default()
             };
             let mut response = retry_on_rate_limit(async || {
@@ -1471,7 +1472,7 @@ impl EditAgentTest {
             Project::init_settings(cx);
             language::init(cx);
             language_model::init(client.clone(), cx);
-            language_models::init(user_store.clone(), client.clone(), fs.clone(), cx);
+            language_models::init(user_store.clone(), client.clone(), cx);
             crate::init(client.http_client(), cx);
         });
 
@@ -1498,8 +1499,16 @@ impl EditAgentTest {
             .await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
 
+        let edit_format = EditFormat::from_env(agent_model.clone()).unwrap();
+
         Self {
-            agent: EditAgent::new(agent_model, project.clone(), action_log, Templates::new()),
+            agent: EditAgent::new(
+                agent_model,
+                project.clone(),
+                action_log,
+                Templates::new(),
+                edit_format,
+            ),
             project,
             judge_model,
         }
@@ -1591,6 +1600,7 @@ impl EditAgentTest {
         let conversation = LanguageModelRequest {
             messages,
             tools,
+            thinking_allowed: true,
             ..Default::default()
         };
 
@@ -1651,14 +1661,16 @@ async fn retry_on_rate_limit<R>(mut request: impl AsyncFnMut() -> Result<R>) -> 
         match request().await {
             Ok(result) => return Ok(result),
             Err(err) => match err.downcast::<LanguageModelCompletionError>() {
-                Ok(err) => match err {
-                    LanguageModelCompletionError::RateLimit(duration) => {
+                Ok(err) => match &err {
+                    LanguageModelCompletionError::RateLimitExceeded { retry_after, .. }
+                    | LanguageModelCompletionError::ServerOverloaded { retry_after, .. } => {
+                        let retry_after = retry_after.unwrap_or(Duration::from_secs(5));
                         // Wait for the duration supplied, with some jitter to avoid all requests being made at the same time.
-                        let jitter = duration.mul_f64(rand::thread_rng().gen_range(0.0..1.0));
+                        let jitter = retry_after.mul_f64(rand::thread_rng().gen_range(0.0..1.0));
                         eprintln!(
-                            "Attempt #{attempt}: Rate limit exceeded. Retry after {duration:?} + jitter of {jitter:?}"
+                            "Attempt #{attempt}: {err}. Retry after {retry_after:?} + jitter of {jitter:?}"
                         );
-                        Timer::after(duration + jitter).await;
+                        Timer::after(retry_after + jitter).await;
                         continue;
                     }
                     _ => return Err(err.into()),
