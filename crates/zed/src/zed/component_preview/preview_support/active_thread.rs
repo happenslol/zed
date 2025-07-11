@@ -1,4 +1,5 @@
-use agent::{ActiveThread, ContextStore, MessageSegment, TextThreadStore, ThreadStore};
+use agent::{ContextStore, MessageSegment, TextThreadStore, ThreadStore};
+use agent_ui::ActiveThread;
 use anyhow::{Result, anyhow};
 use assistant_tool::ToolWorkingSet;
 use gpui::{AppContext, AsyncApp, Entity, Task, WeakEntity};
@@ -16,9 +17,10 @@ pub fn load_preview_thread_store(
     cx: &mut AsyncApp,
 ) -> Task<Result<Entity<ThreadStore>>> {
     workspace
-        .update(cx, |_, cx| {
+        .update(cx, |workspace, cx| {
             ThreadStore::load(
                 project.clone(),
+                workspace.app_state().cloud_user_store.clone(),
                 cx.new(|_| ToolWorkingSet::default()),
                 None,
                 Arc::new(PromptBuilder::new(None).unwrap()),

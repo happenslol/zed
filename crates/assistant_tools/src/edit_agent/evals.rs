@@ -7,11 +7,12 @@ use crate::{
 };
 use Role::*;
 use assistant_tool::ToolRegistry;
-use client::{Client, UserStore};
+use client::{Client, CloudUserStore, UserStore};
 use collections::HashMap;
 use fs::FakeFs;
 use futures::{FutureExt, future::LocalBoxFuture};
 use gpui::{AppContext, TestAppContext, Timer};
+use http_client::StatusCode;
 use indoc::{formatdoc, indoc};
 use language_model::{
     LanguageModelRegistry, LanguageModelRequestTool, LanguageModelToolResult,
@@ -29,6 +30,7 @@ use std::{
     path::Path,
     str::FromStr,
     sync::mpsc,
+    time::Duration,
 };
 use util::path;
 
@@ -41,7 +43,7 @@ fn eval_extract_handle_command_output() {
     // ----------------------------|----------
     // claude-3.7-sonnet           |  0.99 (2025-06-14)
     // claude-sonnet-4             |  0.97 (2025-06-14)
-    // gemini-2.5-pro-06-05        |  0.77 (2025-05-22)
+    // gemini-2.5-pro-06-05        |  0.98 (2025-06-16)
     // gemini-2.5-flash            |  0.11 (2025-05-22)
     // gpt-4.1                     |  1.00 (2025-05-22)
 
@@ -59,7 +61,7 @@ fn eval_extract_handle_command_output() {
     let edit_description = "Extract `handle_command_output` method from `run_git_blame`.";
     eval(
         100,
-        0.7, // Taking the lower bar for Gemini
+        0.95,
         0.05,
         EvalInput::from_conversation(
             vec![
@@ -116,7 +118,7 @@ fn eval_delete_run_git_blame() {
     // ----------------------------|----------
     // claude-3.7-sonnet           | 1.0  (2025-06-14)
     // claude-sonnet-4             | 0.96 (2025-06-14)
-    // gemini-2.5-pro-06-05        |
+    // gemini-2.5-pro-06-05        | 1.0  (2025-06-16)
     // gemini-2.5-flash            |
     // gpt-4.1                     |
     let input_file_path = "root/blame.rs";
@@ -241,7 +243,7 @@ fn eval_use_wasi_sdk_in_compile_parser_to_wasm() {
     //
     //  claude-3.7-sonnet              |  0.96 (2025-06-14)
     //  claude-sonnet-4                |  0.11 (2025-06-14)
-    //  gemini-2.5-pro-preview-03-25   |  0.99 (2025-05-22)
+    //  gemini-2.5-pro-preview-latest  |  0.99 (2025-06-16)
     //  gemini-2.5-flash-preview-04-17 |
     //  gpt-4.1                        |
     let input_file_path = "root/lib.rs";
@@ -364,17 +366,23 @@ fn eval_disable_cursor_blinking() {
     //  Model                          | Pass rate
     // ============================================
     //
-    //  claude-3.7-sonnet              |  0.99 (2025-06-14)
-    //  claude-sonnet-4                |  0.85 (2025-06-14)
-    //  gemini-2.5-pro-preview-03-25   |  1.0  (2025-05-22)
-    //  gemini-2.5-flash-preview-04-17 |
-    //  gpt-4.1                        |
+    //  claude-3.7-sonnet              |  0.59 (2025-07-14)
+    //  claude-sonnet-4                |  0.81 (2025-07-14)
+    //  gemini-2.5-pro                 |  0.95 (2025-07-14)
+    //  gemini-2.5-flash-preview-04-17 |  0.78 (2025-07-14)
+    //  gpt-4.1                        |  0.00 (2025-07-14) (follows edit_description too literally)
     let input_file_path = "root/editor.rs";
     let input_file_content = include_str!("evals/fixtures/disable_cursor_blinking/before.rs");
     let edit_description = "Comment out the call to `BlinkManager::enable`";
+    let possible_diffs = vec![
+        include_str!("evals/fixtures/disable_cursor_blinking/possible-01.diff"),
+        include_str!("evals/fixtures/disable_cursor_blinking/possible-02.diff"),
+        include_str!("evals/fixtures/disable_cursor_blinking/possible-03.diff"),
+        include_str!("evals/fixtures/disable_cursor_blinking/possible-04.diff"),
+    ];
     eval(
         100,
-        0.95,
+        0.51,
         0.05,
         EvalInput::from_conversation(
             vec![
@@ -432,11 +440,7 @@ fn eval_disable_cursor_blinking() {
                 ),
             ],
             Some(input_file_content.into()),
-            EvalAssertion::judge_diff(indoc! {"
-                - Calls to BlinkManager in `observe_window_activation` were commented out
-                - The call to `blink_manager.enable` above the call to show_cursor_names was commented out
-                - All the edits have valid indentation
-            "}),
+            EvalAssertion::assert_diff_any(possible_diffs),
         ),
     );
 }
@@ -453,12 +457,11 @@ fn eval_from_pixels_constructor() {
     // (e.g., at the beginning of the file), yet the evaluation may still
     // rate it highly.
     //
-    //  Model                          | Pass rate
-    // ============================================
-    //
-    //  claude-4.0-sonnet              |  0.99
-    //  claude-3.7-sonnet              |  0.88
-    //  gemini-2.5-pro-preview-03-25   |  0.96
+    //  Model                          | Date        | Pass rate
+    // =========================================================
+    //  claude-4.0-sonnet              | 2025-06-14  | 0.99
+    //  claude-3.7-sonnet              | 2025-06-14  | 0.88
+    //  gemini-2.5-pro-preview-06-05   | 2025-06-16  | 0.98
     //  gpt-4.1                        |
     let input_file_path = "root/canvas.rs";
     let input_file_content = include_str!("evals/fixtures/from_pixels_constructor/before.rs");
@@ -1263,6 +1266,7 @@ impl EvalAssertion {
                     content: vec![prompt.into()],
                     cache: false,
                 }],
+                thinking_allowed: true,
                 ..Default::default()
             };
             let mut response = retry_on_rate_limit(async || {
@@ -1466,12 +1470,14 @@ impl EditAgentTest {
             client::init_settings(cx);
             let client = Client::production(cx);
             let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+            let cloud_user_store =
+                cx.new(|cx| CloudUserStore::new(client.cloud_client(), user_store.clone(), cx));
 
             settings::init(cx);
             Project::init_settings(cx);
             language::init(cx);
             language_model::init(client.clone(), cx);
-            language_models::init(user_store.clone(), client.clone(), fs.clone(), cx);
+            language_models::init(user_store.clone(), cloud_user_store, client.clone(), cx);
             crate::init(client.http_client(), cx);
         });
 
@@ -1498,8 +1504,16 @@ impl EditAgentTest {
             .await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
 
+        let edit_format = EditFormat::from_env(agent_model.clone()).unwrap();
+
         Self {
-            agent: EditAgent::new(agent_model, project.clone(), action_log, Templates::new()),
+            agent: EditAgent::new(
+                agent_model,
+                project.clone(),
+                action_log,
+                Templates::new(),
+                edit_format,
+            ),
             project,
             judge_model,
         }
@@ -1591,6 +1605,7 @@ impl EditAgentTest {
         let conversation = LanguageModelRequest {
             messages,
             tools,
+            thinking_allowed: true,
             ..Default::default()
         };
 
@@ -1651,14 +1666,40 @@ async fn retry_on_rate_limit<R>(mut request: impl AsyncFnMut() -> Result<R>) -> 
         match request().await {
             Ok(result) => return Ok(result),
             Err(err) => match err.downcast::<LanguageModelCompletionError>() {
-                Ok(err) => match err {
-                    LanguageModelCompletionError::RateLimit(duration) => {
+                Ok(err) => match &err {
+                    LanguageModelCompletionError::RateLimitExceeded { retry_after, .. }
+                    | LanguageModelCompletionError::ServerOverloaded { retry_after, .. } => {
+                        let retry_after = retry_after.unwrap_or(Duration::from_secs(5));
                         // Wait for the duration supplied, with some jitter to avoid all requests being made at the same time.
-                        let jitter = duration.mul_f64(rand::thread_rng().gen_range(0.0..1.0));
+                        let jitter = retry_after.mul_f64(rand::thread_rng().gen_range(0.0..1.0));
                         eprintln!(
-                            "Attempt #{attempt}: Rate limit exceeded. Retry after {duration:?} + jitter of {jitter:?}"
+                            "Attempt #{attempt}: {err}. Retry after {retry_after:?} + jitter of {jitter:?}"
                         );
-                        Timer::after(duration + jitter).await;
+                        Timer::after(retry_after + jitter).await;
+                        continue;
+                    }
+                    LanguageModelCompletionError::UpstreamProviderError {
+                        status,
+                        retry_after,
+                        ..
+                    } => {
+                        // Only retry for specific status codes
+                        let should_retry = matches!(
+                            *status,
+                            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+                        ) || status.as_u16() == 529;
+
+                        if !should_retry {
+                            return Err(err.into());
+                        }
+
+                        // Use server-provided retry_after if available, otherwise use default
+                        let retry_after = retry_after.unwrap_or(Duration::from_secs(5));
+                        let jitter = retry_after.mul_f64(rand::thread_rng().gen_range(0.0..1.0));
+                        eprintln!(
+                            "Attempt #{attempt}: {err}. Retry after {retry_after:?} + jitter of {jitter:?}"
+                        );
+                        Timer::after(retry_after + jitter).await;
                         continue;
                     }
                     _ => return Err(err.into()),

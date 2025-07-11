@@ -221,6 +221,10 @@ messages!(
     (ResolveCompletionDocumentationResponse, Background),
     (ResolveInlayHint, Background),
     (ResolveInlayHintResponse, Background),
+    (GetDocumentColor, Background),
+    (GetDocumentColorResponse, Background),
+    (GetColorPresentation, Background),
+    (GetColorPresentationResponse, Background),
     (RefreshCodeLens, Background),
     (GetCodeLens, Background),
     (GetCodeLensResponse, Background),
@@ -257,6 +261,8 @@ messages!(
     (Unfollow, Foreground),
     (UnshareProject, Foreground),
     (Unstage, Background),
+    (Stash, Background),
+    (StashPop, Background),
     (UpdateBuffer, Foreground),
     (UpdateBufferFile, Foreground),
     (UpdateChannelBuffer, Foreground),
@@ -400,6 +406,8 @@ request_messages!(
         ResolveCompletionDocumentationResponse
     ),
     (ResolveInlayHint, ResolveInlayHintResponse),
+    (GetDocumentColor, GetDocumentColorResponse),
+    (GetColorPresentation, GetColorPresentationResponse),
     (RespondToChannelInvite, Ack),
     (RespondToContactRequest, Ack),
     (SaveBuffer, BufferSaved),
@@ -413,6 +421,8 @@ request_messages!(
     (TaskContextForLocation, TaskContext),
     (Test, Test),
     (Unstage, Ack),
+    (Stash, Ack),
+    (StashPop, Ack),
     (UpdateBuffer, Ack),
     (UpdateParticipantLocation, Ack),
     (UpdateProject, Ack),
@@ -487,9 +497,11 @@ entity_messages!(
     BufferSaved,
     CloseBuffer,
     Commit,
+    GetColorPresentation,
     CopyProjectEntry,
     CreateBufferForPeer,
     CreateProjectEntry,
+    GetDocumentColor,
     DeleteProjectEntry,
     ExpandProjectEntry,
     ExpandAllForProjectEntry,
@@ -541,6 +553,8 @@ entity_messages!(
     TaskContextForLocation,
     UnshareProject,
     Unstage,
+    Stash,
+    StashPop,
     UpdateBuffer,
     UpdateBufferFile,
     UpdateDiagnosticSummary,
@@ -624,7 +638,7 @@ impl From<Timestamp> for SystemTime {
 
 impl From<SystemTime> for Timestamp {
     fn from(time: SystemTime) -> Self {
-        let duration = time.duration_since(UNIX_EPOCH).unwrap();
+        let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
         Self {
             seconds: duration.as_secs(),
             nanos: duration.subsec_nanos(),
@@ -768,6 +782,25 @@ pub fn split_repository_update(
         is_last_update: true,
         ..update
     }])
+}
+
+impl MultiLspQuery {
+    pub fn request_str(&self) -> &str {
+        match self.request {
+            Some(multi_lsp_query::Request::GetHover(_)) => "GetHover",
+            Some(multi_lsp_query::Request::GetCodeActions(_)) => "GetCodeActions",
+            Some(multi_lsp_query::Request::GetSignatureHelp(_)) => "GetSignatureHelp",
+            Some(multi_lsp_query::Request::GetCodeLens(_)) => "GetCodeLens",
+            Some(multi_lsp_query::Request::GetDocumentDiagnostics(_)) => "GetDocumentDiagnostics",
+            Some(multi_lsp_query::Request::GetDocumentColor(_)) => "GetDocumentColor",
+            Some(multi_lsp_query::Request::GetDefinition(_)) => "GetDefinition",
+            Some(multi_lsp_query::Request::GetDeclaration(_)) => "GetDeclaration",
+            Some(multi_lsp_query::Request::GetTypeDefinition(_)) => "GetTypeDefinition",
+            Some(multi_lsp_query::Request::GetImplementation(_)) => "GetImplementation",
+            Some(multi_lsp_query::Request::GetReferences(_)) => "GetReferences",
+            None => "<unknown>",
+        }
+    }
 }
 
 #[cfg(test)]

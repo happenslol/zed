@@ -8,11 +8,12 @@ mod tool_metrics;
 
 use assertions::{AssertionsReport, display_error_row};
 use instance::{ExampleInstance, JudgeOutput, RunOutput, run_git};
+use language_extension::LspAccess;
 pub(crate) use tool_metrics::*;
 
 use ::fs::RealFs;
 use clap::Parser;
-use client::{Client, ProxySettings, UserStore};
+use client::{Client, CloudUserStore, ProxySettings, UserStore};
 use collections::{HashMap, HashSet};
 use extension::ExtensionHostProxy;
 use futures::future;
@@ -63,7 +64,7 @@ struct Args {
 }
 
 fn main() {
-    dotenv::from_filename(CARGO_MANIFEST_DIR.join(".env")).ok();
+    dotenvy::from_filename(CARGO_MANIFEST_DIR.join(".env")).ok();
 
     env_logger::init();
 
@@ -328,6 +329,7 @@ pub struct AgentAppState {
     pub languages: Arc<LanguageRegistry>,
     pub client: Arc<Client>,
     pub user_store: Entity<UserStore>,
+    pub cloud_user_store: Entity<CloudUserStore>,
     pub fs: Arc<dyn fs::Fs>,
     pub node_runtime: NodeRuntime,
 
@@ -382,6 +384,8 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
     let languages = Arc::new(languages);
 
     let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+    let cloud_user_store =
+        cx.new(|cx| CloudUserStore::new(client.cloud_client(), user_store.clone(), cx));
 
     extension::init(cx);
 
@@ -415,15 +419,24 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
 
     language::init(cx);
     debug_adapter_extension::init(extension_host_proxy.clone(), cx);
-    language_extension::init(extension_host_proxy.clone(), languages.clone());
+    language_extension::init(
+        LspAccess::Noop,
+        extension_host_proxy.clone(),
+        languages.clone(),
+    );
     language_model::init(client.clone(), cx);
-    language_models::init(user_store.clone(), client.clone(), fs.clone(), cx);
+    language_models::init(
+        user_store.clone(),
+        cloud_user_store.clone(),
+        client.clone(),
+        cx,
+    );
     languages::init(languages.clone(), node_runtime.clone(), cx);
     prompt_store::init(cx);
     terminal_view::init(cx);
     let stdout_is_a_pty = false;
     let prompt_builder = PromptBuilder::load(fs.clone(), stdout_is_a_pty, cx);
-    agent::init(
+    agent_ui::init(
         fs.clone(),
         client.clone(),
         prompt_builder.clone(),
@@ -442,6 +455,7 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
         languages,
         client,
         user_store,
+        cloud_user_store,
         fs,
         node_runtime,
         prompt_builder,

@@ -8,6 +8,7 @@ use crate::{
 use anyhow::anyhow;
 use call::ActiveCall;
 use channel::{ChannelBuffer, ChannelStore};
+use client::CloudUserStore;
 use client::{
     self, ChannelId, Client, Connection, Credentials, EstablishConnectionError, UserStore,
     proto::PeerId,
@@ -256,6 +257,7 @@ impl TestServer {
                             ZedVersion(SemanticVersion::new(1, 0, 0)),
                             None,
                             None,
+                            None,
                             Some(connection_id_tx),
                             Executor::Deterministic(cx.background_executor().clone()),
                             None,
@@ -280,12 +282,15 @@ impl TestServer {
             .register_hosting_provider(Arc::new(git_hosting_providers::Github::public_instance()));
 
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+        let cloud_user_store =
+            cx.new(|cx| CloudUserStore::new(client.cloud_client(), user_store.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
         let language_registry = Arc::new(LanguageRegistry::test(cx.executor()));
         let session = cx.new(|cx| AppSession::new(Session::test(), cx));
         let app_state = Arc::new(workspace::AppState {
             client: client.clone(),
             user_store: user_store.clone(),
+            cloud_user_store,
             workspace_store,
             languages: language_registry,
             fs: fs.clone(),
@@ -313,7 +318,7 @@ impl TestServer {
                 settings::KeymapFile::load_asset_allow_partial_failure(os_keymap, cx).unwrap(),
             );
             language_model::LanguageModelRegistry::test(cx);
-            assistant_context_editor::init(client.clone(), cx);
+            assistant_context::init(client.clone(), cx);
             agent_settings::init(cx);
         });
 
@@ -691,17 +696,17 @@ impl TestClient {
                 current: store
                     .contacts()
                     .iter()
-                    .map(|contact| contact.user.github_login.clone())
+                    .map(|contact| contact.user.github_login.clone().to_string())
                     .collect(),
                 outgoing_requests: store
                     .outgoing_contact_requests()
                     .iter()
-                    .map(|user| user.github_login.clone())
+                    .map(|user| user.github_login.clone().to_string())
                     .collect(),
                 incoming_requests: store
                     .incoming_contact_requests()
                     .iter()
-                    .map(|user| user.github_login.clone())
+                    .map(|user| user.github_login.clone().to_string())
                     .collect(),
             })
     }
