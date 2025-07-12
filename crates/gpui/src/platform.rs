@@ -124,6 +124,15 @@ pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
+    Rc::new(
+        WindowsPlatform::new()
+            .inspect_err(|err| show_error("Failed to launch", err.to_string()))
+            .unwrap(),
+    )
+}
+
 /// Return which compositor we're guessing we'll use.
 /// Does not attempt to connect to the given compositor
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -153,15 +162,6 @@ pub fn guess_compositor() -> &'static str {
     } else {
         "Headless"
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
-    Rc::new(
-        WindowsPlatform::new()
-            .inspect_err(|err| show_error("Failed to launch", err.to_string()))
-            .unwrap(),
-    )
 }
 
 pub(crate) trait Platform: 'static {
@@ -284,6 +284,16 @@ pub trait PlatformDisplay: Send + Sync + Debug {
 
     /// Get the bounds for this display
     fn bounds(&self) -> Bounds<Pixels>;
+
+    /// Get the name of this display
+    fn name(&self) -> Option<String> {
+        None
+    }
+
+    /// Get the description of this display
+    fn description(&self) -> Option<String> {
+        None
+    }
 
     /// Get the default bounds for this display to place a window
     fn default_bounds(&self) -> Bounds<Pixels> {

@@ -31,7 +31,7 @@ use crate::{
 };
 use raw_window_handle as rwh;
 use wayland_backend::client::ObjectId;
-use wayland_client::WEnum;
+use wayland_client::{protocol::wl_output, WEnum};
 use wayland_client::{Proxy, protocol::wl_surface};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1;
 use wayland_protocols::wp::viewporter::client::wp_viewport;
@@ -188,6 +188,7 @@ impl From<KeyboardInteractivity> for zwlr_layer_surface_v1::KeyboardInteractivit
 enum Surface {
     Xdg((XdgSurface, XdgToplevel, Option<ZxdgToplevelDecorationV1>)),
     Layer(ZwlrLayerSurfaceV1),
+    #[allow(dead_code)]
     Popup((XdgPopup, XdgSurface)),
 }
 
@@ -220,11 +221,12 @@ impl Surface {
         }
     }
 
+    #[allow(dead_code)]
     fn popop(&self) {
         unimplemented!()
     }
 
-    fn destory(&self) {
+    fn destroy(&self) {
         match self {
             Surface::Xdg((surface, toplevel, decoration)) => {
                 surface.destroy();
@@ -397,7 +399,7 @@ impl Drop for WaylandWindow {
             viewport.destroy();
         }
         state.wl_surface.destroy();
-        state.surface.destory();
+        state.surface.destroy();
 
         let state_ptr = self.0.clone();
         state
@@ -428,6 +430,7 @@ impl WaylandWindow {
         client: WaylandClientStatePtr,
         params: WindowParams,
         appearance: WindowAppearance,
+        output: Option<wl_output::WlOutput>,
     ) -> anyhow::Result<(Self, ObjectId)> {
         let wl_surface = globals.compositor.create_surface(&globals.qh, ());
 
@@ -460,7 +463,7 @@ impl WaylandWindow {
             WindowKind::LayerShell(ref layer_shell_settings) => {
                 let layer_surface = globals.layer_shell.get_layer_surface(
                     &wl_surface,
-                    None,
+                    output.as_ref(),
                     layer_shell_settings.layer.into(),
                     layer_shell_settings.namespace.clone(),
                     &globals.qh,
@@ -1110,6 +1113,7 @@ impl PlatformWindow for WaylandWindow {
             Rc::new(WaylandDisplay {
                 id: id.clone(),
                 name: display.name.clone(),
+                description: display.description.clone(),
                 bounds: display.bounds.to_pixels(state.scale),
             }) as Rc<dyn PlatformDisplay>
         })
