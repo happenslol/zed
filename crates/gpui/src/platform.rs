@@ -287,6 +287,16 @@ pub trait PlatformDisplay: Send + Sync + Debug {
     /// Get the bounds for this display
     fn bounds(&self) -> Bounds<Pixels>;
 
+    /// Get the name of this display
+    fn name(&self) -> Option<String> {
+        None
+    }
+
+    /// Get the description of this display
+    fn description(&self) -> Option<String> {
+        None
+    }
+
     /// Get the default bounds for this display to place a window
     fn default_bounds(&self) -> Bounds<Pixels> {
         let center = self.bounds().center();

@@ -14,6 +14,7 @@ pub(crate) struct WaylandDisplay {
     /// The ID of the wl_output object
     pub id: ObjectId,
     pub name: Option<String>,
+    pub description: Option<String>,
     pub bounds: Bounds<Pixels>,
 }
 
@@ -34,6 +35,14 @@ impl PlatformDisplay for WaylandDisplay {
             .as_ref()
             .context("Wayland display does not have a name")?;
         Ok(Uuid::new_v5(&Uuid::NAMESPACE_DNS, name.as_bytes()))
+    }
+
+    fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    fn description(&self) -> Option<String> {
+        self.description.clone()
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
