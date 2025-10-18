@@ -20,7 +20,6 @@ use smallvec::SmallVec;
 use util::ResultExt;
 use wayland_backend::client::ObjectId;
 use wayland_backend::protocol::WEnum;
-use wayland_client::event_created_child;
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_data_device_manager::DndAction;
@@ -36,6 +35,7 @@ use wayland_client::{
         wl_shm_pool, wl_surface,
     },
 };
+use wayland_client::{event_created_child, protocol::wl_output::WlOutput};
 use wayland_protocols::wp::cursor_shape::v1::client::{
     wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1,
 };
@@ -166,6 +166,7 @@ impl Globals {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InProgressOutput {
     name: Option<String>,
+    description: Option<String>,
     scale: Option<i32>,
     position: Option<Point<DevicePixels>>,
     size: Option<Size<DevicePixels>>,
@@ -177,6 +178,7 @@ impl InProgressOutput {
             let scale = self.scale.unwrap_or(1);
             Some(Output {
                 name: self.name.clone(),
+                description: self.description.clone(),
                 scale,
                 bounds: Bounds::new(position, size),
             })
@@ -189,6 +191,7 @@ impl InProgressOutput {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Output {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub scale: i32,
     pub bounds: Bounds<DevicePixels>,
 }
@@ -642,6 +645,7 @@ impl LinuxClient for WaylandClient {
                 Rc::new(WaylandDisplay {
                     id: id.clone(),
                     name: output.name.clone(),
+                    description: output.description.clone(),
                     bounds: output.bounds.to_pixels(output.scale as f32),
                 }) as Rc<dyn PlatformDisplay>
             })
@@ -658,6 +662,7 @@ impl LinuxClient for WaylandClient {
                     Rc::new(WaylandDisplay {
                         id: object_id.clone(),
                         name: output.name.clone(),
+                        description: output.description.clone(),
                         bounds: output.bounds.to_pixels(output.scale as f32),
                     }) as Rc<dyn PlatformDisplay>
                 })
@@ -703,6 +708,15 @@ impl LinuxClient for WaylandClient {
             .as_ref()
             .and_then(|w| w.toplevel());
 
+        // TODO: Store wl_output in object and then use it here, also find a better way to get the
+        // display id
+        let output = params.display_id.and_then(|id| {
+            state
+                .outputs
+                .iter()
+                .find(|(object_id, output)| output.id() == id.0)
+        });
+
         let (window, surface_id) = WaylandWindow::new(
             handle,
             state.globals.clone(),
@@ -711,6 +725,7 @@ impl LinuxClient for WaylandClient {
             params,
             state.common.appearance,
             parent,
+            output,
         )?;
         state.windows.insert(surface_id, window.0.clone());
 
@@ -1029,6 +1044,9 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
         match event {
             wl_output::Event::Name { name } => {
                 in_progress_output.name = Some(name);
+            }
+            wl_output::Event::Description { description } => {
+                in_progress_output.description = Some(description);
             }
             wl_output::Event::Scale { factor } => {
                 in_progress_output.scale = Some(factor);

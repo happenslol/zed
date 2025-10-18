@@ -12,8 +12,8 @@ use futures::channel::oneshot::Receiver;
 
 use raw_window_handle as rwh;
 use wayland_backend::client::ObjectId;
-use wayland_client::WEnum;
 use wayland_client::{Proxy, protocol::wl_surface};
+use wayland_client::{WEnum, protocol::wl_output::WlOutput};
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 use wayland_protocols::xdg::shell::client::xdg_surface;
@@ -346,6 +346,7 @@ impl WaylandWindow {
         params: WindowParams,
         appearance: WindowAppearance,
         parent: Option<XdgToplevel>,
+        output: Option<&WlOutput>,
     ) -> anyhow::Result<(Self, ObjectId)> {
         let surface = globals.compositor.create_surface(&globals.qh, ());
 
@@ -355,7 +356,7 @@ impl WaylandWindow {
             (WindowKind::LayerShell(options), Some(layer_shell)) => {
                 let layer_surface = layer_shell.get_layer_surface(
                     &surface,
-                    None,
+                    output,
                     options.layer.into(),
                     options.namespace.clone(),
                     &globals.qh,
@@ -1031,6 +1032,7 @@ impl PlatformWindow for WaylandWindow {
             Rc::new(WaylandDisplay {
                 id: id.clone(),
                 name: display.name.clone(),
+                description: display.description.clone(),
                 bounds: display.bounds.to_pixels(state.scale),
             }) as Rc<dyn PlatformDisplay>
         })

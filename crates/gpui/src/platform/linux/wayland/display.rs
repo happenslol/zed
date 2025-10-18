@@ -14,6 +14,7 @@ pub(crate) struct WaylandDisplay {
     /// The ID of the wl_output object
     pub id: ObjectId,
     pub name: Option<String>,
+    pub description: Option<String>,
     pub bounds: Bounds<Pixels>,
 }
 
