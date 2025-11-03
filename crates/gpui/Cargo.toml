@@ -320,3 +320,7 @@ path = "examples/window_shadow.rs"
 [[example]]
 name = "grid_layout"
 path = "examples/grid_layout.rs"
+
+[[example]]
+name = "picker"
+path = "examples/picker.rs"
