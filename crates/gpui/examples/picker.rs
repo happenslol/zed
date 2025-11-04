@@ -24,9 +24,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use gpui::{
     App, Application, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, Task, TextRun, UTF16Selection, Window, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, rgb, rgba, size, uniform_list, white,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollStrategy,
+    ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection, UniformListScrollHandle,
+    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, rgba, size,
+    uniform_list, white,
 };
 use unicode_segmentation::*;
 
@@ -540,6 +541,7 @@ struct PickerExample {
     search_count: Arc<AtomicUsize>,
     last_query: String,
     needs_search_update: bool,
+    scroll_handle: UniformListScrollHandle,
 }
 
 impl PickerExample {
@@ -601,6 +603,7 @@ impl PickerExample {
             search_count: Arc::new(AtomicUsize::new(0)),
             last_query: String::new(),
             needs_search_update: false,
+            scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
@@ -687,6 +690,8 @@ impl PickerExample {
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.filtered_items.is_empty() {
             self.selected_index = (self.selected_index + 1) % self.filtered_items.len();
+            self.scroll_handle
+                .scroll_to_item(self.selected_index, ScrollStrategy::Bottom);
             cx.notify();
         }
     }
@@ -698,6 +703,8 @@ impl PickerExample {
             } else {
                 self.selected_index -= 1;
             }
+            self.scroll_handle
+                .scroll_to_item(self.selected_index, ScrollStrategy::Top);
             cx.notify();
         }
     }
@@ -802,6 +809,7 @@ impl Render for PickerExample {
                             result_items
                         }),
                     )
+                    .track_scroll(self.scroll_handle.clone())
                     .h_full()
                     .into_any_element()
                 }),
