@@ -19,7 +19,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
     App, Application, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
@@ -538,7 +538,8 @@ struct PickerExample {
     selected_index: usize,
     search_task: Option<Task<()>>,
     cancel_flag: Arc<AtomicBool>,
-    search_count: Arc<AtomicUsize>,
+    search_count: usize,
+    displayed_search_id: Option<usize>,
     last_query: String,
     needs_search_update: bool,
     scroll_handle: UniformListScrollHandle,
@@ -600,7 +601,8 @@ impl PickerExample {
             selected_index: 0,
             search_task: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            search_count: Arc::new(AtomicUsize::new(0)),
+            search_count: 0,
+            displayed_search_id: None,
             last_query: String::new(),
             needs_search_update: false,
             scroll_handle: UniformListScrollHandle::new(),
@@ -624,11 +626,10 @@ impl PickerExample {
         self.cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_flag = self.cancel_flag.clone();
 
-        // Allocate a new search ID for this search
-        // fetch_add returns the old value, so this search gets a unique ID
-        let search_id = self.search_count.fetch_add(1, Ordering::SeqCst);
+        // Capture search ID and increment count
+        let search_id = self.search_count;
+        self.search_count += 1;
         let all_items = self.all_items.clone();
-        let search_count = self.search_count.clone();
 
         // Store the task - dropping the old one cancels the entire async flow
         self.search_task = Some(cx.spawn_in(window, async move |picker, cx| {
@@ -665,20 +666,18 @@ impl PickerExample {
                 })
                 .await;
 
-            // Third layer of protection: check if this search is still relevant
-            // This handles the race condition where a search completes right as we start a new one.
-            // search_count holds the NEXT search ID that would be allocated,
-            // so the latest search that was actually started is search_count - 1
-            let current_search_count = search_count.load(Ordering::SeqCst);
-            let latest_started_search_id = current_search_count.saturating_sub(1);
-            if search_id < latest_started_search_id {
-                // A newer search has started, discard these results
-                return;
-            }
-
             // Update matches on foreground thread
             picker
                 .update(cx, |picker, cx| {
+                    // Third layer of protection: check if this search is still relevant
+                    // This handles the race condition where a search completes right as we start a new one.
+                    // Only update if this search is newer than what's currently displayed
+                    if picker.displayed_search_id.is_some_and(|id| id <= search_id) {
+                        // An equal or newer search has already updated the UI, discard these results
+                        return;
+                    }
+
+                    picker.displayed_search_id = Some(search_id);
                     picker.filtered_items = matches;
                     picker.selected_index = 0;
                     cx.notify();
