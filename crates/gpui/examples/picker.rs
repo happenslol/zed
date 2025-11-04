@@ -1,19 +1,32 @@
 //! A GPUI example demonstrating a file-finder-style picker with:
 //! - A custom text input field with selection and cursor support
 //! - A searchable list with keyboard navigation (up/down arrows)
-//! - Background search with proper cancellation
+//! - Background search with three-layer cancellation (matches file_finder pattern)
 //! - Real-time filtering as you type
+//!
+//! ## Cancellation Strategy (matches file_finder)
+//!
+//! When a new search starts, three mechanisms ensure old searches don't interfere:
+//!
+//! 1. **Task drop**: Storing the task and replacing it drops the old one, cancelling
+//!    the entire async flow (outer cancellation)
+//!
+//! 2. **Cancel flag**: The flag is checked before/after expensive work, allowing
+//!    early exit from background operations (inner cancellation)
+//!
+//! 3. **Search ID check**: Before updating UI, we verify this search is still the
+//!    latest one, handling race conditions where a search completes as another starts
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, rgba, size, uniform_list, white, App, Application, Bounds,
-    Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, Task, TextRun,
-    UTF16Selection, Window, WindowBounds, WindowOptions,
+    App, Application, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, Task, TextRun, UTF16Selection, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, rgba, size, uniform_list, white,
 };
 use unicode_segmentation::*;
 
@@ -21,18 +34,8 @@ actions!(
     picker_example,
     [
         // Text input actions
-        Backspace,
-        Delete,
-        Left,
-        Right,
-        SelectAll,
-        Paste,
-        // Picker actions
-        SelectNext,
-        SelectPrev,
-        Confirm,
-        Cancel,
-        Quit,
+        Backspace, Delete, Left, Right, SelectAll, Paste, // Picker actions
+        SelectNext, SelectPrev, Confirm, Cancel, Quit,
     ]
 );
 
@@ -602,12 +605,7 @@ impl PickerExample {
     }
 
     fn check_and_update_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self
-            .text_input
-            .read(cx)
-            .content
-            .to_string()
-            .to_lowercase();
+        let query = self.text_input.read(cx).content.to_string().to_lowercase();
 
         // Only update if query changed
         if query == self.last_query {
@@ -616,43 +614,56 @@ impl PickerExample {
 
         self.last_query = query.clone();
 
-        // Cancel any in-flight search
+        // Two-layer cancellation (matches file_finder pattern):
+        // 1. Set cancel flag to signal in-flight work to exit early
         self.cancel_flag.store(true, Ordering::Release);
+        // 2. Create new flag for this search
+        self.cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag = self.cancel_flag.clone();
 
         // Allocate a new search ID for this search
         // fetch_add returns the old value, so this search gets a unique ID
         let search_id = self.search_count.fetch_add(1, Ordering::SeqCst);
-        self.cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_flag = self.cancel_flag.clone();
         let all_items = self.all_items.clone();
         let search_count = self.search_count.clone();
 
+        // Store the task - dropping the old one cancels the entire async flow
         self.search_task = Some(cx.spawn_in(window, async move |picker, cx| {
+            // Small delay to demonstrate async behavior (can be removed in production)
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+
             // Perform search on background thread
             let matches = cx
                 .background_executor()
                 .spawn(async move {
-                    // Small delay to demonstrate async behavior (can be removed in production)
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-
-                    // Check if cancelled
+                    // Check cancel flag before doing work
                     if cancel_flag.load(Ordering::Acquire) {
                         return Vec::new();
                     }
 
-                    // Filter items
-                    if query.is_empty() {
+                    // Filter items (in real apps, this would be expensive fuzzy matching)
+                    let results = if query.is_empty() {
                         all_items
                     } else {
                         all_items
                             .into_iter()
                             .filter(|item| item.to_lowercase().contains(&query))
                             .collect()
+                    };
+
+                    // Check cancel flag after work (for expensive operations, check periodically)
+                    if cancel_flag.load(Ordering::Acquire) {
+                        return Vec::new();
                     }
+
+                    results
                 })
                 .await;
 
-            // Check if this search is still relevant or has been superseded
+            // Third layer of protection: check if this search is still relevant
+            // This handles the race condition where a search completes right as we start a new one.
             // search_count holds the NEXT search ID that would be allocated,
             // so the latest search that was actually started is search_count - 1
             let current_search_count = search_count.load(Ordering::SeqCst);
@@ -766,31 +777,27 @@ impl Render for PickerExample {
                         cx.processor(move |_this, range, _window, _cx| {
                             let mut result_items = Vec::new();
                             for ix in range {
-                                if ix < filtered_items.len() {
-                                    let is_selected = ix == selected_index;
-                                    let item_string = format!("{}", &filtered_items[ix]);
-                                    result_items.push(
-                                        div()
-                                            .id(ix)
-                                            .px_3()
-                                            .py_2()
-                                            .cursor_pointer()
-                                            .when(is_selected, |div| {
-                                                div.bg(rgb(0x0066ff)).text_color(white())
-                                            })
-                                            .when(!is_selected, |div| {
-                                                div.bg(white())
-                                                    .hover(|div| div.bg(rgb(0xf0f0f0)))
-                                            })
-                                            .on_click({
-                                                let item_string = item_string.clone();
-                                                move |_event, _window, _cx| {
-                                                    println!("Clicked: {}", item_string);
-                                                }
-                                            })
-                                            .child(item_string),
-                                    );
+                                if ix >= filtered_items.len() {
+                                    break;
                                 }
+
+                                let is_selected = ix == selected_index;
+                                let item_string: &String = &filtered_items[ix];
+                                let item_string = item_string.to_string();
+                                result_items.push(
+                                    div()
+                                        .id(ix)
+                                        .px_3()
+                                        .py_2()
+                                        .cursor_pointer()
+                                        .when(is_selected, |div| {
+                                            div.bg(rgb(0x0066ff)).text_color(white())
+                                        })
+                                        .when(!is_selected, |div| {
+                                            div.bg(white()).hover(|div| div.bg(rgb(0xf0f0f0)))
+                                        })
+                                        .child(item_string),
+                                );
                             }
                             result_items
                         }),
