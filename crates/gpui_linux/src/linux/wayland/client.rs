@@ -182,6 +182,7 @@ impl Globals {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InProgressOutput {
     name: Option<String>,
+    description: Option<String>,
     scale: Option<i32>,
     position: Option<Point<DevicePixels>>,
     size: Option<Size<DevicePixels>>,
@@ -194,6 +195,7 @@ impl InProgressOutput {
             let scale = self.scale.unwrap_or(1);
             Some(Output {
                 name: self.name.clone(),
+                description: self.description.clone(),
                 scale,
                 bounds: Bounds::new(position, size),
                 subpixel: self.subpixel,
@@ -207,6 +209,7 @@ impl InProgressOutput {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Output {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub scale: i32,
     pub bounds: Bounds<DevicePixels>,
     pub subpixel: Option<wl_output::Subpixel>,
@@ -756,6 +759,7 @@ impl LinuxClient for WaylandClient {
                 Rc::new(WaylandDisplay {
                     id: id.clone(),
                     name: output.name.clone(),
+                    description: output.description.clone(),
                     bounds: output.bounds.to_pixels(output.scale as f32),
                 }) as Rc<dyn PlatformDisplay>
             })
@@ -772,6 +776,7 @@ impl LinuxClient for WaylandClient {
                     Rc::new(WaylandDisplay {
                         id: object_id.clone(),
                         name: output.name.clone(),
+                        description: output.description.clone(),
                         bounds: output.bounds.to_pixels(output.scale as f32),
                     }) as Rc<dyn PlatformDisplay>
                 })
@@ -1235,6 +1240,9 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
         match event {
             wl_output::Event::Name { name } => {
                 in_progress_output.name = Some(name);
+            }
+            wl_output::Event::Description { description } => {
+                in_progress_output.description = Some(description);
             }
             wl_output::Event::Scale { factor } => {
                 in_progress_output.scale = Some(factor);
