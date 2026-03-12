@@ -253,6 +253,8 @@ impl Platform for TestPlatform {
 
     fn on_thermal_state_change(&self, _: Box<dyn FnMut()>) {}
 
+    fn on_display_changed(&self, _: Box<dyn FnMut()>) {}
+
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
     }

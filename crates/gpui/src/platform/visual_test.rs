@@ -259,4 +259,6 @@ impl Platform for VisualTestPlatform {
     }
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
 }

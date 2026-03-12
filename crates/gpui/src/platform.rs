@@ -205,6 +205,8 @@ pub trait Platform: 'static {
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>);
+
     fn compositor_name(&self) -> &'static str {
         ""
     }
