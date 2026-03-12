@@ -33,7 +33,7 @@ use smallvec::SmallVec;
 use stacksafe::{StackSafe, stacksafe};
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
+    cell::{Cell, RefCell},
     cmp::Ordering,
     fmt::Debug,
     marker::PhantomData,
@@ -1200,6 +1200,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Track the bounds of this element with the given handle.
+    fn track_bounds(mut self, bounds_handle: &BoundsHandle) -> Self {
+        self.interactivity().tracked_bounds_handle = Some(bounds_handle.clone());
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
         self.interactivity().tracked_scroll_handle = Some(scroll_handle.clone());
@@ -1668,6 +1674,7 @@ pub struct Interactivity {
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
+    pub(crate) tracked_bounds_handle: Option<BoundsHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
@@ -1815,6 +1822,10 @@ impl Interactivity {
         f: impl FnOnce(&Style, Point<Pixels>, Option<Hitbox>, &mut Window, &mut App) -> R,
     ) -> R {
         self.content_size = content_size;
+
+        if let Some(bounds_handle) = &self.tracked_bounds_handle {
+            bounds_handle.0.set(bounds);
+        }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         window.with_inspector_state(
@@ -3378,6 +3389,26 @@ enum ScrollStrategy {
     #[default]
     FirstVisible,
     Top,
+}
+
+/// A handle for reading the bounds of an element after layout and prepaint.
+///
+/// Store in your view state and attach to an element via `.track_bounds(&handle)`.
+/// The bounds are updated every frame during prepaint. Before the first paint,
+/// `bounds()` returns `Bounds::default()` (zero-sized at the origin).
+#[derive(Clone, Default)]
+pub struct BoundsHandle(Rc<Cell<Bounds<Pixels>>>);
+
+impl BoundsHandle {
+    /// Construct a new bounds handle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the current bounds of the tracked element.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.0.get()
+    }
 }
 
 /// A handle to the scrollable aspects of an element.

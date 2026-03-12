@@ -711,7 +711,8 @@ mod test {
 
     use crate::{
         self as gpui, AppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
-        KeyBinding, Keystroke, ParentElement, Render, TestAppContext, Window, div,
+        KeyBinding, Keystroke, ParentElement, Render, StatefulInteractiveElement, Styled,
+        TestAppContext, Window, div,
     };
 
     struct TestView {
@@ -777,5 +778,69 @@ mod test {
                 assert!(test_view.saw_action);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_track_bounds(cx: &mut TestAppContext) {
+        use crate::{BoundsHandle, Pixels, Size, px};
+
+        struct TrackBoundsView {
+            bounds_handle: BoundsHandle,
+            width: Pixels,
+            height: Pixels,
+        }
+
+        impl Render for TrackBoundsView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().child(
+                    div()
+                        .id("tracked")
+                        .track_bounds(&self.bounds_handle)
+                        .w(self.width)
+                        .h(self.height),
+                )
+            }
+        }
+
+        let bounds_handle = BoundsHandle::new();
+        let bounds_handle_clone = bounds_handle.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|_cx| TrackBoundsView {
+                    bounds_handle: bounds_handle_clone,
+                    width: px(300.),
+                    height: px(150.),
+                })
+            })
+            .unwrap()
+        });
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            bounds_handle.bounds().size,
+            Size::<Pixels> {
+                width: px(300.),
+                height: px(150.),
+            }
+        );
+
+        window
+            .update(cx, |view, _, cx| {
+                view.width = px(500.);
+                view.height = px(250.);
+                cx.notify();
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            bounds_handle.bounds().size,
+            Size::<Pixels> {
+                width: px(500.),
+                height: px(250.),
+            }
+        );
     }
 }
