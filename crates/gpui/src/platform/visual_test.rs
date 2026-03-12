@@ -269,4 +269,5 @@ impl Platform for VisualTestPlatform {
             "Idle sleep prevention for {reason:?} is not supported in visual tests"
         )))
     }
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
 }

@@ -122,6 +122,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
     pub(crate) system_sleep: Option<Box<dyn FnMut()>>,
     pub(crate) system_wake: Option<Box<dyn FnMut()>>,
+    pub(crate) display_changed: Option<Box<dyn FnMut()>>,
 }
 
 /// A logind `PrepareForSleep` signal, forwarded from the D-Bus listener to
@@ -287,6 +288,11 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     }
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .with_common(|common| common.callbacks.display_changed = Some(callback));
+    }
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal

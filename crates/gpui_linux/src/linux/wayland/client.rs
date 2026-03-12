@@ -339,6 +339,7 @@ pub(crate) struct WaylandClientState {
     outputs: HashMap<ObjectId, Output>,
     in_progress_outputs: HashMap<ObjectId, InProgressOutput>,
     wl_outputs: HashMap<ObjectId, wl_output::WlOutput>,
+    output_registry_names: HashMap<u32, ObjectId>,
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
     compose_state: Option<xkb::compose::State>,
@@ -850,6 +851,7 @@ impl WaylandClient {
         let mut in_progress_outputs = HashMap::default();
         #[allow(clippy::mutable_key_type)]
         let mut wl_outputs: HashMap<ObjectId, wl_output::WlOutput> = HashMap::default();
+        let mut output_registry_names: HashMap<u32, ObjectId> = HashMap::default();
         globals.contents().with_list(|list| {
             for global in list {
                 match &global.interface[..] {
@@ -869,6 +871,7 @@ impl WaylandClient {
                             (),
                         );
                         in_progress_outputs.insert(output.id(), InProgressOutput::default());
+                        output_registry_names.insert(global.name, output.id());
                         wl_outputs.insert(output.id(), output);
                     }
                     _ => {}
@@ -1009,6 +1012,7 @@ impl WaylandClient {
             outputs: HashMap::default(),
             in_progress_outputs,
             wl_outputs,
+            output_registry_names,
             windows: HashMap::default(),
             common,
             keyboard_layout: LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME),
@@ -1509,12 +1513,22 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                     state
                         .in_progress_outputs
                         .insert(output.id(), InProgressOutput::default());
+                    state.output_registry_names.insert(name, output.id());
                     state.wl_outputs.insert(output.id(), output);
                 }
                 _ => {}
             },
-            wl_registry::Event::GlobalRemove { name: _ } => {
-                // TODO: handle global removal
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some(object_id) = state.output_registry_names.remove(&name) {
+                    state.outputs.remove(&object_id);
+                    state.in_progress_outputs.remove(&object_id);
+                    if let Some(output) = state.wl_outputs.remove(&object_id) {
+                        output.release();
+                    }
+                    if let Some(callback) = state.common.callbacks.display_changed.as_mut() {
+                        callback();
+                    }
+                }
             }
             _ => {}
         }
@@ -1669,6 +1683,9 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
                     state.outputs.insert(output.id(), complete);
                 }
                 state.in_progress_outputs.remove(&output.id());
+                if let Some(callback) = state.common.callbacks.display_changed.as_mut() {
+                    callback();
+                }
             }
             _ => {}
         }

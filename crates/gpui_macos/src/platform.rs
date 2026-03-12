@@ -1016,6 +1016,8 @@ impl Platform for MacPlatform {
         self.ensure_system_power_observers();
     }
 
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn thermal_state(&self) -> ThermalState {
         unsafe {
             let process_info: id = msg_send![class!(NSProcessInfo), processInfo];

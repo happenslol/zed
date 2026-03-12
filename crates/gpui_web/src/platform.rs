@@ -545,6 +545,8 @@ impl Platform for WebPlatform {
         )))
     }
 
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn compositor_name(&self) -> &'static str {
         "Web"
     }

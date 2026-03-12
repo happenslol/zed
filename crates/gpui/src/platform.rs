@@ -354,6 +354,8 @@ pub trait Platform: 'static {
         _ = callback;
     }
 
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>);
+
     fn compositor_name(&self) -> &'static str {
         ""
     }
