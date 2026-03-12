@@ -16,6 +16,9 @@ use wayland_client::{
     Proxy,
     protocol::{wl_output, wl_surface},
 };
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_surface_v1, ext_session_lock_v1,
+};
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 use wayland_protocols::xdg::shell::client::xdg_surface;
@@ -34,7 +37,9 @@ use gpui::{
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
-    WindowDecorations, WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError, px,
+    WindowDecorations, WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError,
+    px,
+    session_lock::SessionLockNotSupportedError,
     size,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
@@ -128,6 +133,7 @@ pub struct WaylandWindowState {
 pub enum WaylandSurfaceState {
     Xdg(WaylandXdgSurfaceState),
     LayerShell(WaylandLayerSurfaceState),
+    SessionLock(WaylandSessionLockSurfaceState),
 }
 
 impl WaylandSurfaceState {
@@ -137,7 +143,20 @@ impl WaylandSurfaceState {
         params: &WindowParams,
         parent: Option<WaylandWindowStatePtr>,
         target_output: Option<wl_output::WlOutput>,
+        session_lock: Option<&ext_session_lock_v1::ExtSessionLockV1>,
     ) -> anyhow::Result<Self> {
+        // For session lock surfaces, create a lock surface
+        if params.kind == WindowKind::SessionLock {
+            let session_lock = session_lock.ok_or(SessionLockNotSupportedError)?;
+            let target_output = target_output
+                .ok_or_else(|| anyhow::anyhow!("SessionLock windows require a target output"))?;
+            let lock_surface =
+                session_lock.get_lock_surface(surface, &target_output, &globals.qh, surface.id());
+            return Ok(WaylandSurfaceState::SessionLock(
+                WaylandSessionLockSurfaceState { lock_surface },
+            ));
+        }
+
         // For layer_shell windows, create a layer surface instead of an xdg surface
         if let WindowKind::LayerShell(options) = &params.kind {
             let Some(layer_shell) = globals.layer_shell.as_ref() else {
@@ -245,6 +264,10 @@ pub struct WaylandLayerSurfaceState {
     layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
 }
 
+pub struct WaylandSessionLockSurfaceState {
+    lock_surface: ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+}
+
 impl WaylandSurfaceState {
     fn ack_configure(&self, serial: u32) {
         match self {
@@ -253,6 +276,9 @@ impl WaylandSurfaceState {
             }
             WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) => {
                 layer_surface.ack_configure(serial);
+            }
+            WaylandSurfaceState::SessionLock(WaylandSessionLockSurfaceState { lock_surface }) => {
+                lock_surface.ack_configure(serial);
             }
         }
     }
@@ -282,6 +308,9 @@ impl WaylandSurfaceState {
                 // cannot set window position of a layer surface
                 layer_surface.set_size(width as u32, height as u32);
             }
+            WaylandSurfaceState::SessionLock(_) => {
+                // Session lock surfaces cannot set geometry; size comes from configure events
+            }
         }
     }
 
@@ -305,6 +334,9 @@ impl WaylandSurfaceState {
             }
             WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface }) => {
                 layer_surface.destroy();
+            }
+            WaylandSurfaceState::SessionLock(WaylandSessionLockSurfaceState { lock_surface }) => {
+                lock_surface.destroy();
             }
         }
     }
@@ -516,10 +548,17 @@ impl WaylandWindow {
         appearance: WindowAppearance,
         parent: Option<WaylandWindowStatePtr>,
         target_output: Option<wl_output::WlOutput>,
+        session_lock: Option<&ext_session_lock_v1::ExtSessionLockV1>,
     ) -> anyhow::Result<(Self, ObjectId)> {
         let surface = globals.compositor.create_surface(&globals.qh, ());
-        let surface_state =
-            WaylandSurfaceState::new(&surface, &globals, &params, parent.clone(), target_output)?;
+        let surface_state = WaylandSurfaceState::new(
+            &surface,
+            &globals,
+            &params,
+            parent.clone(),
+            target_output,
+            session_lock,
+        )?;
 
         if let Some(fractional_scale_manager) = globals.fractional_scale_manager.as_ref() {
             fractional_scale_manager.get_fractional_scale(&surface, &globals.qh, surface.id());
@@ -547,8 +586,14 @@ impl WaylandWindow {
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
         });
 
-        // Kick things off
-        surface.commit();
+        // Session lock surfaces must not be committed before the first ack_configure
+        // per the ext-session-lock-v1 protocol.
+        if !matches!(
+            this.0.state.borrow().surface_state,
+            WaylandSurfaceState::SessionLock(_)
+        ) {
+            surface.commit();
+        }
 
         Ok((this, surface.id()))
     }
@@ -854,6 +899,35 @@ impl WaylandWindowStatePtr {
                 true
             }
             _ => false,
+        }
+    }
+
+    pub fn handle_session_lock_surface_event(&self, event: ext_session_lock_surface_v1::Event) {
+        match event {
+            ext_session_lock_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                let size = if width == 0 || height == 0 {
+                    None
+                } else {
+                    Some(size(px(width as f32), px(height as f32)))
+                };
+
+                let mut state = self.state.borrow_mut();
+                state.in_progress_configure = Some(InProgressConfigure {
+                    size,
+                    fullscreen: false,
+                    maximized: false,
+                    resizing: false,
+                    tiling: Tiling::default(),
+                });
+                drop(state);
+
+                self.handle_xdg_surface_event(xdg_surface::Event::Configure { serial });
+            }
+            _ => {}
         }
     }
 

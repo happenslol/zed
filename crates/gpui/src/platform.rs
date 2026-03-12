@@ -6,6 +6,10 @@ mod keystroke;
 #[expect(missing_docs)]
 pub mod layer_shell;
 
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[expect(missing_docs)]
+pub mod session_lock;
+
 #[cfg(any(test, feature = "test-support"))]
 mod test;
 
@@ -244,6 +248,24 @@ pub trait Platform: 'static {
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout>;
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper>;
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>);
+
+    /// Lock the session using the ext-session-lock-v1 Wayland protocol.
+    /// After calling this, use `open_window` with `WindowKind::SessionLock`
+    /// to create lock surfaces on each output.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn lock_session(&self) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "Session locking is not supported on this platform"
+        ))
+    }
+
+    /// Unlock the session and destroy all lock surfaces.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn unlock_session(&self) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "Session locking is not supported on this platform"
+        ))
+    }
 }
 
 /// A handle to a platform's display, e.g. a monitor or laptop screen.
@@ -1607,6 +1629,11 @@ pub enum WindowKind {
     /// docks, notifications or wallpapers.
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     LayerShell(layer_shell::LayerShellOptions),
+
+    /// A Wayland session lock surface, used to display a lock screen on an output while the
+    /// session is locked via the ext-session-lock-v1 protocol.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    SessionLock,
 
     /// A window that appears on top of its parent window and blocks interaction with it
     /// until the modal window is closed

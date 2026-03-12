@@ -1159,6 +1159,43 @@ impl App {
         })
     }
 
+    /// Lock the session, creating lock surfaces on all outputs.
+    ///
+    /// The provided callback is invoked for each output to build the root view
+    /// of the lock surface window. This uses the `ext-session-lock-v1` Wayland
+    /// protocol under the hood. Only supported on Wayland compositors that
+    /// implement this protocol.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn lock_session<V: 'static + Render>(
+        &mut self,
+        build_lock_window: impl Fn(&mut Window, &mut App) -> Entity<V> + 'static,
+    ) -> anyhow::Result<()> {
+        use crate::WindowOptions;
+
+        self.platform.lock_session()?;
+
+        let displays = self.displays();
+        for display in displays {
+            self.open_window(
+                WindowOptions {
+                    titlebar: None,
+                    display_id: Some(display.id()),
+                    kind: crate::WindowKind::SessionLock,
+                    ..Default::default()
+                },
+                |window, cx| build_lock_window(window, cx),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Unlock the session and destroy all lock surfaces.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn unlock_session(&mut self) -> anyhow::Result<()> {
+        self.platform.unlock_session()
+    }
+
     /// Instructs the platform to activate the application by bringing it to the foreground.
     pub fn activate(&self, ignoring_other_apps: bool) {
         self.platform.activate(ignoring_other_apps);
