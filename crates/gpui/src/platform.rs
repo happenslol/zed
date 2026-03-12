@@ -738,6 +738,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     fn play_system_bell(&self) {}
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn set_input_region(&self, _region: Bounds<Pixels>) {}
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn set_input_passthrough(&self) {}
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn reset_input_region(&self) {}
 
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {

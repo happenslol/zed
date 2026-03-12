@@ -1593,6 +1593,40 @@ impl PlatformWindow for WaylandWindow {
             bell.ring(surface);
         }
     }
+
+    fn set_input_region(&self, region: Bounds<Pixels>) {
+        let state = self.borrow();
+        let input_region = state
+            .globals
+            .compositor
+            .create_region(&state.globals.qh, ());
+        input_region.add(
+            f32::from(region.origin.x) as i32,
+            f32::from(region.origin.y) as i32,
+            f32::from(region.size.width) as i32,
+            f32::from(region.size.height) as i32,
+        );
+        state.surface.set_input_region(Some(&input_region));
+        input_region.destroy();
+        state.surface.commit();
+    }
+
+    fn set_input_passthrough(&self) {
+        let state = self.borrow();
+        let input_region = state
+            .globals
+            .compositor
+            .create_region(&state.globals.qh, ());
+        state.surface.set_input_region(Some(&input_region));
+        input_region.destroy();
+        state.surface.commit();
+    }
+
+    fn reset_input_region(&self) {
+        let state = self.borrow();
+        state.surface.set_input_region(None);
+        state.surface.commit();
+    }
 }
 
 fn update_window(mut state: RefMut<WaylandWindowState>) {

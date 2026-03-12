@@ -2225,6 +2225,25 @@ impl Window {
         self.platform_window.set_app_id(app_id);
     }
 
+    /// Sets the mouse-interactive area of the window to the given bounds.
+    /// Only clicks within this region will be received; the rest passes through.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_input_region(&self, region: Bounds<Pixels>) {
+        self.platform_window.set_input_region(region);
+    }
+
+    /// Disables all mouse interactivity on the window by setting an empty input region.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_input_passthrough(&self) {
+        self.platform_window.set_input_passthrough();
+    }
+
+    /// Resets input region to the entire window (the Wayland default).
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn reset_input_region(&self) {
+        self.platform_window.reset_input_region();
+    }
+
     /// Sets the window background appearance.
     pub fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.platform_window
