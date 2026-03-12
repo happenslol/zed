@@ -18,6 +18,9 @@ use wayland_client::{
     Proxy,
     protocol::{wl_callback, wl_output, wl_seat, wl_surface},
 };
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_surface_v1, ext_session_lock_v1,
+};
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 use wayland_protocols::xdg::shell::client::xdg_popup;
@@ -42,7 +45,9 @@ use gpui::{
     WindowKind, WindowParams, WindowVisibility,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
-    px, size,
+    px,
+    session_lock::SessionLockNotSupportedError,
+    size,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
@@ -143,6 +148,7 @@ pub enum WaylandSurfaceState {
     Xdg(WaylandXdgSurfaceState),
     LayerShell(WaylandLayerSurfaceState),
     Popup(WaylandPopupSurfaceState),
+    SessionLock(WaylandSessionLockSurfaceState),
 }
 
 impl WaylandSurfaceState {
@@ -153,7 +159,20 @@ impl WaylandSurfaceState {
         parent: Option<WaylandWindowStatePtr>,
         popup_grab: Option<(u32, wl_seat::WlSeat)>,
         target_output: Option<wl_output::WlOutput>,
+        session_lock: Option<&ext_session_lock_v1::ExtSessionLockV1>,
     ) -> anyhow::Result<Self> {
+        // For session lock surfaces, create a lock surface
+        if params.kind == WindowKind::SessionLock {
+            let session_lock = session_lock.ok_or(SessionLockNotSupportedError)?;
+            let target_output = target_output
+                .ok_or_else(|| anyhow::anyhow!("SessionLock windows require a target output"))?;
+            let lock_surface =
+                session_lock.get_lock_surface(surface, &target_output, &globals.qh, surface.id());
+            return Ok(WaylandSurfaceState::SessionLock(
+                WaylandSessionLockSurfaceState { lock_surface },
+            ));
+        }
+
         // For layer_shell windows, create a layer surface instead of an xdg surface
         if let WindowKind::LayerShell(options) = &params.kind {
             let Some(layer_shell) = globals.layer_shell.as_ref() else {
@@ -369,6 +388,10 @@ fn build_popup_positioner(
     positioner
 }
 
+pub struct WaylandSessionLockSurfaceState {
+    lock_surface: ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+}
+
 impl WaylandSurfaceState {
     fn ack_configure(&self, serial: u32) {
         match self {
@@ -380,6 +403,9 @@ impl WaylandSurfaceState {
             }
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 xdg_surface.ack_configure(serial);
+            }
+            WaylandSurfaceState::SessionLock(WaylandSessionLockSurfaceState { lock_surface }) => {
+                lock_surface.ack_configure(serial);
             }
         }
     }
@@ -408,7 +434,7 @@ impl WaylandSurfaceState {
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 Some(xdg_surface)
             }
-            WaylandSurfaceState::LayerShell(_) => None,
+            WaylandSurfaceState::LayerShell(_) | WaylandSurfaceState::SessionLock(_) => None,
         }
     }
 
@@ -433,6 +459,9 @@ impl WaylandSurfaceState {
             }
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 xdg_surface.set_window_geometry(x, y, width, height);
+            }
+            WaylandSurfaceState::SessionLock(_) => {
+                // Session lock surfaces cannot set geometry; size comes from configure events
             }
         }
     }
@@ -534,6 +563,9 @@ impl WaylandSurfaceState {
                 // Role object before its xdg_surface, as with the toplevel above.
                 xdg_popup.destroy();
                 xdg_surface.destroy();
+            }
+            WaylandSurfaceState::SessionLock(WaylandSessionLockSurfaceState { lock_surface }) => {
+                lock_surface.destroy();
             }
         }
     }
@@ -829,6 +861,7 @@ impl WaylandWindow {
         parent: Option<WaylandWindowStatePtr>,
         popup_grab: Option<(u32, wl_seat::WlSeat)>,
         target_output: Option<wl_output::WlOutput>,
+        session_lock: Option<&ext_session_lock_v1::ExtSessionLockV1>,
     ) -> anyhow::Result<(Self, ObjectId)> {
         let surface = globals.compositor.create_surface(&globals.qh, ());
         let surface_state = WaylandSurfaceState::new(
@@ -838,6 +871,7 @@ impl WaylandWindow {
             parent.clone(),
             popup_grab,
             target_output,
+            session_lock,
         )?;
 
         if let Some(fractional_scale_manager) = globals.fractional_scale_manager.as_ref() {
@@ -870,8 +904,14 @@ impl WaylandWindow {
             scheduled_frame_at: Rc::new(Cell::new(None)),
         });
 
-        // Kick things off
-        surface.commit();
+        // Session lock surfaces must not be committed before the first ack_configure
+        // per the ext-session-lock-v1 protocol.
+        if !matches!(
+            this.0.state.borrow().surface_state,
+            WaylandSurfaceState::SessionLock(_)
+        ) {
+            surface.commit();
+        }
 
         Ok((this, surface.id()))
     }
@@ -1381,6 +1421,36 @@ impl WaylandWindowStatePtr {
             // Precedes the reposition's Configure, which does the work. The token is not needed.
             xdg_popup::Event::Repositioned { .. } => false,
             _ => false,
+        }
+    }
+
+    pub fn handle_session_lock_surface_event(&self, event: ext_session_lock_surface_v1::Event) {
+        match event {
+            ext_session_lock_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                let size = if width == 0 || height == 0 {
+                    None
+                } else {
+                    Some(size(px(width as f32), px(height as f32)))
+                };
+
+                let mut state = self.state.borrow_mut();
+                state.in_progress_configure = Some(InProgressConfigure {
+                    size,
+                    fullscreen: false,
+                    maximized: false,
+                    resizing: false,
+                    visibility: WindowVisibility::Visible,
+                    tiling: Tiling::default(),
+                });
+                drop(state);
+
+                self.handle_xdg_surface_event(xdg_surface::Event::Configure { serial });
+            }
+            _ => {}
         }
     }
 
