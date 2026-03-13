@@ -229,7 +229,7 @@ impl WgpuRenderer {
             None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
         };
 
-        let atlas = Arc::new(WgpuAtlas::from_context(context));
+        let atlas = Arc::clone(&context.atlas);
 
         Self::new_internal(
             Some(Rc::clone(&gpu_context)),
@@ -252,7 +252,7 @@ impl WgpuRenderer {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?;
 
-        let atlas = Arc::new(WgpuAtlas::from_context(context));
+        let atlas = Arc::clone(&context.atlas);
 
         Self::new_internal(None, context, surface, config, None, atlas)
     }
@@ -1058,6 +1058,10 @@ impl WgpuRenderer {
         }
     }
 
+    /// Returns the shared sprite atlas.
+    /// On Linux (Wayland/X11), the atlas is accessed directly from WgpuContext
+    /// to support lazy renderer creation. This method is kept for macOS/web compatibility.
+    #[allow(dead_code)]
     pub fn sprite_atlas(&self) -> &Arc<WgpuAtlas> {
         &self.atlas
     }
@@ -1756,6 +1760,9 @@ impl WgpuRenderer {
         // Release surface-bound GPU resources eagerly so the underlying native
         // window can be destroyed before the renderer itself is dropped.
         self.resources.take();
+
+        // Atlas is shared and managed by WgpuContext.
+        // Other wgpu resources are automatically cleaned up when dropped.
     }
 
     /// Returns true if the GPU device was lost and recovery is needed.

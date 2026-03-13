@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
 
+use super::WgpuAtlas;
+
 pub struct WgpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -14,6 +16,11 @@ pub struct WgpuContext {
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
     device_lost: Arc<AtomicBool>,
+    /// Shared atlas that can be used by windows before their renderer is initialized.
+    /// This is useful for layer shell and session lock windows where the initial size
+    /// is unknown and the renderer cannot be created until the compositor provides the
+    /// actual size via configure events.
+    pub atlas: Arc<WgpuAtlas>,
 }
 
 #[derive(Clone, Copy)]
@@ -88,14 +95,23 @@ impl WgpuContext {
             adapter.get_info().backend
         );
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let atlas = Arc::new(WgpuAtlas::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            color_texture_format,
+        ));
+
         Ok(Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             dual_source_blending,
             color_texture_format,
             device_lost,
+            atlas,
         })
     }
 
@@ -128,14 +144,19 @@ impl WgpuContext {
         let (device, queue, dual_source_blending, color_texture_format) =
             Self::create_device(&adapter).await?;
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let atlas = Arc::new(WgpuAtlas::new(Arc::clone(&device), Arc::clone(&queue)));
+
         Ok(Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             dual_source_blending,
             color_texture_format,
             device_lost,
+            atlas,
         })
     }
 

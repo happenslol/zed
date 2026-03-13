@@ -269,6 +269,9 @@ pub struct X11WindowState {
     bounds: Bounds<Pixels>,
     scale_factor: f32,
     renderer: WgpuRenderer,
+    /// Shared atlas from WgpuContext, used for sprite_atlas() to maintain
+    /// consistency with Wayland's lazy renderer pattern.
+    atlas: Arc<dyn PlatformAtlas>,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -723,10 +726,17 @@ impl X11WindowState {
                     transparent: false,
                     preferred_present_mode: None,
                 };
-                WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
+                WgpuRenderer::new(gpu_context.clone(), &raw_window, config, compositor_gpu)?
             };
 
             renderer.set_subpixel_layout(is_bgr);
+
+            let atlas = gpu_context
+                .borrow()
+                .as_ref()
+                .expect("GPU context must be initialized after creating renderer")
+                .atlas
+                .clone();
 
             // Set max window size hints based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
@@ -784,6 +794,7 @@ impl X11WindowState {
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
                 renderer,
+                atlas,
                 atoms: *atoms,
                 input_handler: None,
                 active: false,
@@ -1689,8 +1700,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let inner = self.0.state.borrow();
-        inner.renderer.sprite_atlas().clone()
+        Arc::clone(&self.0.state.borrow().atlas)
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
