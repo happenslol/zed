@@ -117,7 +117,14 @@ pub struct WaylandWindowState {
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: WgpuRenderer,
+    /// The renderer is created lazily for surfaces where the initial size is 0x0
+    /// (e.g., layer shell anchored to opposite edges, or session lock surfaces).
+    /// The compositor provides the actual size via configure events, at which point
+    /// we create the renderer.
+    renderer: Option<WgpuRenderer>,
+    /// Shared atlas from WgpuContext, used when renderer is None and for sprite_atlas().
+    atlas: Arc<dyn PlatformAtlas>,
+    compositor_gpu: Option<CompositorGpuHint>,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -188,9 +195,24 @@ impl WaylandSurfaceState {
                 surface.id(),
             );
 
-            let width = f32::from(params.bounds.size.width);
-            let height = f32::from(params.bounds.size.height);
-            layer_surface.set_size(width as u32, height as u32);
+            // According to wlr-layer-shell protocol, when anchored to opposite edges,
+            // the dimension should be 0 to let the compositor stretch the surface.
+            let anchored_horizontally =
+                options.anchor.contains(Anchor::LEFT) && options.anchor.contains(Anchor::RIGHT);
+            let anchored_vertically =
+                options.anchor.contains(Anchor::TOP) && options.anchor.contains(Anchor::BOTTOM);
+
+            let width = if anchored_horizontally {
+                0
+            } else {
+                f32::from(params.bounds.size.width) as u32
+            };
+            let height = if anchored_vertically {
+                0
+            } else {
+                f32::from(params.bounds.size.height) as u32
+            };
+            layer_surface.set_size(width, height);
 
             layer_surface.set_anchor(super::layer_shell::wayland_anchor(options.anchor));
             layer_surface.set_keyboard_interactivity(
@@ -594,27 +616,34 @@ impl WaylandWindowState {
         options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
     ) -> anyhow::Result<Self> {
-        let renderer = {
-            let raw_window = RawWindow {
-                window: surface.id().as_ptr().cast::<c_void>(),
-                display: surface
-                    .backend()
-                    .upgrade()
-                    .unwrap()
-                    .display_ptr()
-                    .cast::<c_void>(),
-            };
-            let config = WgpuSurfaceConfig {
-                size: Size {
-                    width: DevicePixels(f32::from(options.bounds.size.width) as i32),
-                    height: DevicePixels(f32::from(options.bounds.size.height) as i32),
-                },
-                transparent: true,
-                // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
-                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
-            };
-            WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
+        // For surfaces where the initial size is 0x0 (layer shell anchored to
+        // opposite edges, session lock surfaces), we need to initialize the
+        // WgpuContext (for the shared atlas) but defer actual renderer creation
+        // until the compositor provides a valid size via configure events.
+        let width = f32::from(options.bounds.size.width) as i32;
+        let height = f32::from(options.bounds.size.height) as i32;
+        let has_valid_size = width > 0 && height > 0;
+
+        let init_renderer = Self::create_renderer(
+            &surface,
+            gpu_context.clone(),
+            compositor_gpu,
+            width.max(1),
+            height.max(1),
+        )?;
+
+        let renderer = if has_valid_size {
+            Some(init_renderer)
+        } else {
+            drop(init_renderer);
+            None
         };
+
+        let atlas: Arc<dyn PlatformAtlas> = gpu_context
+            .borrow()
+            .as_ref()
+            .map(|context| context.atlas.clone())
+            .ok_or_else(|| anyhow::anyhow!("GPU context missing after creating a renderer"))?;
 
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
             if let Some(title) = options.titlebar.and_then(|titlebar| titlebar.title) {
@@ -627,10 +656,12 @@ impl WaylandWindowState {
 
             // Set max window size based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
+            if let Some(renderer) = &renderer {
+                let max_texture_size = renderer.max_texture_size() as i32;
+                xdg_state
+                    .toplevel
+                    .set_max_size(max_texture_size, max_texture_size);
+            }
         }
 
         Ok(Self {
@@ -645,6 +676,8 @@ impl WaylandWindowState {
             outputs: HashMap::default(),
             display: None,
             renderer,
+            atlas,
+            compositor_gpu,
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
@@ -684,7 +717,40 @@ impl WaylandWindowState {
             .as_ref()
             .and_then(|(_, output)| output.subpixel)
             .is_some_and(|s| s == Subpixel::HorizontalBgr);
-        self.renderer.set_subpixel_layout(is_bgr);
+
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_subpixel_layout(is_bgr);
+        }
+    }
+
+    fn create_renderer(
+        surface: &wl_surface::WlSurface,
+        gpu_context: gpui_wgpu::GpuContext,
+        compositor_gpu: Option<CompositorGpuHint>,
+        width: i32,
+        height: i32,
+    ) -> anyhow::Result<WgpuRenderer> {
+        let config = WgpuSurfaceConfig {
+            size: Size {
+                width: DevicePixels(width),
+                height: DevicePixels(height),
+            },
+            transparent: true,
+            // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
+            preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+        };
+
+        let backend = surface
+            .backend()
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("Wayland backend has been dropped"))?;
+
+        let raw_window = RawWindow {
+            window: surface.id().as_ptr().cast::<c_void>(),
+            display: backend.display_ptr().cast::<c_void>(),
+        };
+
+        WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)
     }
 
     pub fn primary_output_scale(&mut self) -> i32 {
@@ -802,7 +868,9 @@ impl Drop for WaylandWindow {
 
         let client = state.client.clone();
 
-        state.renderer.destroy();
+        if let Some(renderer) = &mut state.renderer {
+            renderer.destroy();
+        }
 
         // Destroy blur first, this has no dependencies.
         if let Some(blur) = &state.blur {
@@ -1567,7 +1635,31 @@ impl WaylandWindowStatePtr {
                 state.scale = scale;
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
-            state.renderer.update_drawable_size(device_bounds.size);
+            let width = device_bounds.size.width.0;
+            let height = device_bounds.size.height.0;
+
+            if let Some(renderer) = &mut state.renderer {
+                renderer.update_drawable_size(device_bounds.size);
+            } else if width > 0 && height > 0 {
+                let client = state.client.get_client();
+                let client_state = client.borrow();
+                match WaylandWindowState::create_renderer(
+                    &state.surface,
+                    client_state.gpu_context.clone(),
+                    state.compositor_gpu,
+                    width,
+                    height,
+                ) {
+                    Ok(mut renderer) => {
+                        renderer.update_transparency(state.is_transparent());
+                        state.renderer = Some(renderer);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to create renderer: {:?}", err);
+                    }
+                }
+            }
+
             (state.bounds.size, state.scale)
         };
 
@@ -1577,11 +1669,14 @@ impl WaylandWindowStatePtr {
             self.callbacks.borrow_mut().resize = Some(fun);
         }
 
-        {
-            let state = self.state.borrow();
-            if let Some(viewport) = &state.viewport {
-                viewport
-                    .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
+        // Only set viewport destination when we have a valid size.
+        // For layer shell and session lock windows, the initial size may be 0x0
+        // until the compositor sends a configure event with the actual dimensions.
+        let width = f32::from(size.width) as i32;
+        let height = f32::from(size.height) as i32;
+        if width > 0 && height > 0 {
+            if let Some(viewport) = &self.state.borrow().viewport {
+                viewport.set_destination(width, height);
             }
         }
     }
@@ -2021,8 +2116,16 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+        let state = &mut *state;
 
-        if state.renderer.device_lost() {
+        let Some(renderer) = state.renderer.as_mut() else {
+            // Nothing can be presented before the compositor configures a non-zero size.
+            // That configure creates the renderer and requests a redraw.
+            state.redraw_requested = false;
+            return;
+        };
+
+        if renderer.device_lost() {
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
                 display: state
@@ -2033,7 +2136,7 @@ impl PlatformWindow for WaylandWindow {
                     .display_ptr()
                     .cast::<std::ffi::c_void>(),
             };
-            match state.renderer.recover(&raw_window) {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -2050,7 +2153,7 @@ impl PlatformWindow for WaylandWindow {
             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
             state.pending_frame_callback = Some(callback);
         }
-        if state.renderer.draw(scene) {
+        if renderer.draw(scene) {
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
         } else {
@@ -2058,7 +2161,7 @@ impl PlatformWindow for WaylandWindow {
             self.0.frame_loop.set(FrameLoop::PresentationFailed);
         }
 
-        if state.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             state.redraw_requested = true;
         }
     }
@@ -2068,8 +2171,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let state = self.borrow();
-        state.renderer.sprite_atlas().clone()
+        Arc::clone(&self.borrow().atlas)
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -2219,7 +2321,10 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.borrow().renderer.gpu_specs()
+        self.borrow()
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.gpu_specs())
     }
 
     fn play_system_bell(&self) {
@@ -2292,7 +2397,9 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 fn update_window(mut state: RefMut<WaylandWindowState>) {
     let opaque = !state.is_transparent();
 
-    state.renderer.update_transparency(!opaque);
+    if let Some(renderer) = &mut state.renderer {
+        renderer.update_transparency(!opaque);
+    }
     let opaque_area = state.window_bounds.map(|v| f32::from(v) as i32);
     opaque_area.inset(f32::from(state.inset()) as i32);
 

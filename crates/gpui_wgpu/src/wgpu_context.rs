@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
 
+use crate::WgpuAtlas;
+
 #[derive(Clone)]
 pub struct WgpuContext {
     pub instance: wgpu::Instance,
@@ -17,6 +19,11 @@ pub struct WgpuContext {
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
     errors: Arc<DeviceErrorState>,
+    /// Shared atlas that can be used by windows before their renderer is initialized.
+    /// This is useful for layer shell and session lock windows where the initial size
+    /// is unknown and the renderer cannot be created until the compositor provides the
+    /// actual size via configure events.
+    pub atlas: Arc<WgpuAtlas>,
 }
 
 /// Errors reported by wgpu's device-wide callbacks.
@@ -304,15 +311,24 @@ impl WgpuContext {
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let atlas = Arc::new(WgpuAtlas::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            color_texture_format,
+        ));
+
         Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,
             errors,
+            atlas,
         }
     }
 
@@ -402,15 +418,24 @@ impl WgpuContext {
             device.limits(),
         );
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let atlas = Arc::new(WgpuAtlas::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            color_texture_format,
+        ));
+
         let context = Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,
             errors,
+            atlas,
         };
         Ok(PreparedWebGraphics { context, surface })
     }
