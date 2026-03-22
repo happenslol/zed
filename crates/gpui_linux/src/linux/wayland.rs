@@ -7,6 +7,7 @@ mod window;
 
 /// Contains Types for configuring layer_shell surfaces.
 pub mod layer_shell;
+mod popup;
 
 pub(crate) use client::*;
 

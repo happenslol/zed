@@ -60,7 +60,9 @@ use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xd
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
 use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
 use wayland_protocols::{
     wp::cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
@@ -99,8 +101,8 @@ use gpui::{
     ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
     Pixels, PlatformDisplay, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, Size, TaskTiming, TouchPhase, WindowButtonLayout, WindowKind,
-    WindowParams, point, profiler, px, size,
+    ScrollDelta, ScrollWheelEvent, SharedString, Size, TaskTiming, TouchPhase, WindowButtonLayout,
+    WindowKind, WindowParams, point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -263,6 +265,12 @@ pub(crate) struct WaylandClientState {
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
+    /// Stack of popups created with an explicit grab (xdg_popup.grab). Some compositors
+    /// (notably wlroots-based ones, for layer-shell-parented popups) accept the grab but
+    /// do NOT transfer wl_keyboard.enter to the popup surface — keyboard events keep
+    /// arriving on the parent surface. We treat the topmost grabbed popup as the
+    /// effective keyboard target so input is dispatched to it instead of the parent.
+    grabbed_popups: Vec<WaylandWindowStatePtr>,
     loop_handle: LoopHandle<'static, WaylandClientStatePtr>,
     cursor_style: Option<CursorStyle>,
     cursor_hidden_window: Option<WaylandWindowStatePtr>,
@@ -428,6 +436,27 @@ impl WaylandClientStatePtr {
             && !window.ptr_eq(&closed_window)
         {
             state.cursor_hidden_window = Some(window);
+        }
+
+        // If a grabbed popup is being closed, restore focus to whatever was the effective
+        // keyboard target before this popup was pushed. That is either the popup beneath
+        // it on the grab stack, or the wayland-focused parent.
+        let was_grabbed = state
+            .grabbed_popups
+            .last()
+            .is_some_and(|p| p.ptr_eq(&closed_window));
+        state.grabbed_popups.retain(|p| !p.ptr_eq(&closed_window));
+        if was_grabbed {
+            let restore = state
+                .grabbed_popups
+                .last()
+                .cloned()
+                .or_else(|| state.keyboard_focused_window.clone());
+            drop(state);
+            closed_window.set_focused(false);
+            if let Some(window) = restore {
+                window.set_focused(true);
+            }
         }
     }
 }
@@ -739,6 +768,7 @@ impl WaylandClient {
             button_pressed: None,
             mouse_focused_window: None,
             keyboard_focused_window: None,
+            grabbed_popups: Vec::new(),
             loop_handle: handle.clone(),
             enter_token: None,
             cursor_style: None,
@@ -851,6 +881,15 @@ impl LinuxClient for WaylandClient {
         let appearance = state.common.appearance;
         let compositor_gpu = state.compositor_gpu.take();
         let is_session_lock = params.kind == WindowKind::SessionLock;
+        let popup_grab_serial = if matches!(params.kind, WindowKind::XdgPopup(_)) {
+            Some(
+                state
+                    .serial_tracker
+                    .latest_of(&[SerialKind::MousePress, SerialKind::KeyPress]),
+            )
+        } else {
+            None
+        };
         let session_lock = state.session_lock.as_ref();
         let (window, surface_id) = WaylandWindow::new(
             handle,
@@ -863,10 +902,33 @@ impl LinuxClient for WaylandClient {
             parent,
             target_output,
             session_lock,
+            popup_grab_serial,
         )?;
         state.windows.insert(surface_id.clone(), window.0.clone());
         if is_session_lock {
             state.session_lock_surfaces.push(surface_id);
+        }
+
+        // If we asked for a popup grab, register the popup so keyboard events arriving
+        // at the parent surface can be redirected to it. Some compositors don't move
+        // wl_keyboard.enter to the popup, so we have to drive that ourselves.
+        if popup_grab_serial.is_some() {
+            let previous_focus = state.grabbed_popups.last().cloned().or_else(|| {
+                state
+                    .keyboard_focused_window
+                    .as_ref()
+                    .filter(|w| !w.ptr_eq(&window.0))
+                    .cloned()
+            });
+            state.grabbed_popups.push(window.0.clone());
+            let new_focus = window.0.clone();
+            drop(state);
+            if let Some(previous) = previous_focus {
+                if !previous.ptr_eq(&new_focus) {
+                    previous.set_focused(false);
+                }
+            }
+            new_focus.set_focused(true);
         }
 
         Ok(Box::new(window))
@@ -1245,6 +1307,7 @@ delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
 delegate_noop!(WaylandClientStatePtr: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandClientStatePtr: ignore wp_viewport::WpViewport);
 delegate_noop!(WaylandClientStatePtr: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+delegate_noop!(WaylandClientStatePtr: ignore xdg_positioner::XdgPositioner);
 
 impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for WaylandClientStatePtr {
     fn event(
@@ -1483,6 +1546,28 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ObjectId> for WaylandClientStatePtr {
     }
 }
 
+impl Dispatch<xdg_popup::XdgPopup, ObjectId> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        _: &xdg_popup::XdgPopup,
+        event: <xdg_popup::XdgPopup as Proxy>::Event,
+        surface_id: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let Some(window) = get_window(&mut state, surface_id) else {
+            return;
+        };
+        drop(state);
+        let should_close = window.handle_popup_event(event);
+        if should_close {
+            window.close();
+        }
+    }
+}
+
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ObjectId> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
@@ -1671,20 +1756,33 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.enter_token = Some(());
 
-                if let Some(window) = state.keyboard_focused_window.clone() {
+                // If a popup grab is active, the popup is already the effective focus —
+                // skip raising set_focused on the parent surface so its `active` flag
+                // doesn't shadow the popup's.
+                let target = state
+                    .grabbed_popups
+                    .last()
+                    .cloned()
+                    .or_else(|| state.keyboard_focused_window.clone());
+                if let Some(target) = target {
                     drop(state);
-                    window.set_focused(true);
+                    target.set_focused(true);
                 }
             }
             wl_keyboard::Event::Leave { surface, .. } => {
-                let keyboard_focused_window = get_window(&mut state, &surface.id());
+                let leaving_surface_window = get_window(&mut state, &surface.id());
                 state.keyboard_focused_window = None;
                 state.enter_token.take();
                 // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
                 state.repeat.current_id += 1;
                 state.restore_cursor_after_hide();
 
-                if let Some(window) = keyboard_focused_window {
+                let target = state
+                    .grabbed_popups
+                    .last()
+                    .cloned()
+                    .or(leaving_surface_window);
+                if let Some(window) = target {
                     if let Some(ref mut compose) = state.compose_state {
                         compose.reset();
                     }
@@ -1701,7 +1799,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 group,
                 ..
             } => {
-                let focused_window = state.keyboard_focused_window.clone();
+                let focused_window = state
+                    .grabbed_popups
+                    .last()
+                    .cloned()
+                    .or_else(|| state.keyboard_focused_window.clone());
 
                 let keymap_state = state.keymap_state.as_mut().unwrap();
                 let old_layout =
@@ -1733,7 +1835,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
             } => {
                 state.serial_tracker.update(SerialKind::KeyPress, serial);
 
-                let focused_window = state.keyboard_focused_window.clone();
+                let focused_window = state
+                    .grabbed_popups
+                    .last()
+                    .cloned()
+                    .or_else(|| state.keyboard_focused_window.clone());
                 let Some(focused_window) = focused_window else {
                     return;
                 };
@@ -1809,16 +1915,20 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                 move |event_timestamp, _metadata, this| {
                                     let client = this.get_client();
                                     let state = client.borrow();
+                                    let focused_window = state
+                                        .grabbed_popups
+                                        .last()
+                                        .cloned()
+                                        .or_else(|| state.keyboard_focused_window.clone());
                                     let is_repeating = id == state.repeat.current_id
                                         && state.repeat.current_keycode.is_some()
-                                        && state.keyboard_focused_window.is_some();
+                                        && focused_window.is_some();
 
                                     if !is_repeating || rate == 0 {
                                         return TimeoutAction::Drop;
                                     }
 
-                                    let focused_window =
-                                        state.keyboard_focused_window.as_ref().unwrap().clone();
+                                    let focused_window = focused_window.unwrap();
 
                                     drop(state);
                                     focused_window.handle_input(input.clone());

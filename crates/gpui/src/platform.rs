@@ -8,6 +8,10 @@ pub mod layer_shell;
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 #[expect(missing_docs)]
+pub mod popup;
+
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[expect(missing_docs)]
 pub mod session_lock;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1635,6 +1639,11 @@ pub enum WindowKind {
     /// docks, notifications or wallpapers.
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     LayerShell(layer_shell::LayerShellOptions),
+
+    /// A Wayland xdg_popup surface, positioned relative to a parent window using
+    /// the xdg_positioner protocol. Used for menus, tooltips, and popovers.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    XdgPopup(popup::PopupOptions),
 
     /// A Wayland session lock surface, used to display a lock screen on an output while the
     /// session is locked via the ext-session-lock-v1 protocol.
