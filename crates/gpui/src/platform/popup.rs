@@ -46,10 +46,16 @@ pub struct PopupOptions {
     /// press of the mouse button that opens the popup. Open grabbing popups from a mouse-down
     /// handler rather than a click handler, otherwise the grab is refused.
     ///
-    /// Automatic dismissal only covers input aimed at other applications. A click elsewhere in
-    /// your own application still reaches it as usual, so closing the popup in that case is up
-    /// to you. Nested grabbing popups must be closed in the reverse order they were opened.
+    /// Automatic dismissal covers input aimed at other applications and, on Wayland, a mouse
+    /// press in the popup's parent window, which closes the popup and is consumed. A click
+    /// elsewhere in your own application still reaches it as usual, so closing the popup in that
+    /// case is up to you. Nested grabbing popups must be closed in the reverse order they were
+    /// opened.
     pub grab: bool,
+
+    /// Whether the platform should recompute the popup's placement when the parent window
+    /// moves or resizes, instead of leaving it where it was first placed.
+    pub reactive: bool,
 }
 
 /// The point of the anchor rectangle that a popup is anchored to.

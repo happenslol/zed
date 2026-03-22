@@ -274,6 +274,7 @@ impl WaylandSurfaceState {
             };
             positioner.destroy();
 
+            let grabbing = popup_grab.is_some();
             if let Some((serial, seat)) = popup_grab {
                 xdg_popup.grab(&seat, serial);
             }
@@ -287,6 +288,7 @@ impl WaylandSurfaceState {
                 xdg_popup,
                 options: options.clone(),
                 next_reposition_token: Cell::new(0),
+                grabbing,
             }));
         }
 
@@ -357,6 +359,7 @@ pub struct WaylandPopupSurfaceState {
     // Kept so the popup can be re-anchored via `xdg_popup.reposition` when resized.
     options: PopupOptions,
     next_reposition_token: Cell<u32>,
+    grabbing: bool,
 }
 
 fn build_popup_positioner(
@@ -407,6 +410,9 @@ fn build_popup_positioner(
         f32::from(options.offset.x) as i32,
         f32::from(options.offset.y) as i32,
     );
+    if options.reactive && positioner.version() >= xdg_positioner::REQ_SET_REACTIVE_SINCE {
+        positioner.set_reactive();
+    }
     positioner
 }
 
@@ -1710,7 +1716,40 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn is_grabbing_popup(&self) -> bool {
+        matches!(
+            self.state.borrow().surface_state,
+            WaylandSurfaceState::Popup(WaylandPopupSurfaceState { grabbing: true, .. })
+        )
+    }
+
+    /// Closes this window's grabbing popups, returning whether it had any.
+    fn close_grabbing_popup_children(&self) -> bool {
+        let state = self.state.borrow();
+        let client = state.client.get_client();
+        let children = state.children.keys().cloned().collect::<Vec<_>>();
+        drop(state);
+
+        let mut closed_any = false;
+        for child in children {
+            let mut client_state = client.borrow_mut();
+            let window = get_window(&mut client_state, &child);
+            drop(client_state);
+
+            if let Some(popup) = window.filter(|window| window.is_grabbing_popup()) {
+                popup.close();
+                closed_any = true;
+            }
+        }
+        closed_any
+    }
+
     pub fn handle_input(&self, input: PlatformInput) {
+        // The compositor only dismisses grabbing popups for clicks in other clients, so a click
+        // in the parent closes them here and is consumed, like a click outside a menu.
+        if matches!(input, PlatformInput::MouseDown(_)) && self.close_grabbing_popup_children() {
+            return;
+        }
         if self.is_blocked() {
             return;
         }

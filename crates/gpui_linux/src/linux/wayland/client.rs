@@ -365,6 +365,12 @@ pub(crate) struct WaylandClientState {
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
+    /// Stack of popups created with an explicit grab (xdg_popup.grab). Some compositors
+    /// (notably wlroots-based ones, for layer-shell-parented popups) accept the grab but
+    /// do NOT transfer wl_keyboard.enter to the popup surface — keyboard events keep
+    /// arriving on the parent surface. We treat the topmost grabbed popup as the
+    /// effective keyboard target so input is dispatched to it instead of the parent.
+    grabbed_popups: Vec<WaylandWindowStatePtr>,
     loop_handle: LoopHandle<'static, WaylandClientStatePtr>,
     cursor_style: Option<CursorStyle>,
     cursor_hidden_window: Option<WaylandWindowStatePtr>,
@@ -735,10 +741,36 @@ impl WaylandClientStatePtr {
         {
             state.cursor_hidden_window = Some(window);
         }
+
+        // If a grabbed popup is being closed, restore focus to whatever was the effective
+        // keyboard target before this popup was pushed. That is either the popup beneath
+        // it on the grab stack, or the wayland-focused parent.
+        let was_grabbed = state
+            .grabbed_popups
+            .last()
+            .is_some_and(|popup| popup.ptr_eq(&closed_window));
+        state
+            .grabbed_popups
+            .retain(|popup| !popup.ptr_eq(&closed_window));
+        if was_grabbed {
+            let restore = state.keyboard_target();
+            drop(state);
+            closed_window.set_focused(false);
+            if let Some(window) = restore {
+                window.set_focused(true);
+            }
+        }
     }
 }
 
 impl WaylandClientState {
+    fn keyboard_target(&self) -> Option<WaylandWindowStatePtr> {
+        self.grabbed_popups
+            .last()
+            .cloned()
+            .or_else(|| self.keyboard_focused_window.clone())
+    }
+
     fn hide_cursor_until_mouse_moves(&mut self) {
         if self.cursor_hidden_window.is_some() {
             return;
@@ -1064,6 +1096,7 @@ impl WaylandClient {
             button_pressed: None,
             mouse_focused_window: None,
             keyboard_focused_window: None,
+            grabbed_popups: Vec::new(),
             loop_handle: handle.clone(),
             enter_token: None,
             cursor_style: None,
@@ -1202,6 +1235,7 @@ impl LinuxClient for WaylandClient {
         let appearance = state.common.appearance;
         let compositor_gpu = state.compositor_gpu.take();
         let is_session_lock = params.kind == WindowKind::SessionLock;
+        let is_grabbing_popup = popup_grab.is_some();
         let session_lock = state.session_lock.as_ref();
         let (window, surface_id) = WaylandWindow::new(
             handle,
@@ -1223,6 +1257,21 @@ impl LinuxClient for WaylandClient {
         state.windows.insert(surface_id.clone(), window.0.clone());
         if is_session_lock {
             state.session_lock_surfaces.push(surface_id);
+        }
+
+        // Some compositors don't move wl_keyboard.enter to a grabbing popup, so make it the
+        // effective keyboard target ourselves.
+        if is_grabbing_popup {
+            let previous_focus = state.keyboard_target();
+            state.grabbed_popups.push(window.0.clone());
+            let new_focus = window.0.clone();
+            drop(state);
+            if let Some(previous) = previous_focus
+                && !previous.ptr_eq(&new_focus)
+            {
+                previous.set_focused(false);
+            }
+            new_focus.set_focused(true);
         }
 
         Ok(Box::new(window))
@@ -2100,20 +2149,23 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.enter_token = Some(());
 
-                if let Some(window) = state.keyboard_focused_window.clone() {
+                // While a popup grab is active the popup stays the effective focus, so the
+                // parent's active flag doesn't shadow the popup's.
+                if let Some(window) = state.keyboard_target() {
                     drop(state);
                     window.set_focused(true);
                 }
             }
             wl_keyboard::Event::Leave { surface, .. } => {
-                let keyboard_focused_window = get_window(&mut state, &surface.id());
+                let leaving_window = get_window(&mut state, &surface.id());
                 state.keyboard_focused_window = None;
                 state.enter_token.take();
                 // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
                 state.repeat.current_id += 1;
                 state.restore_cursor_after_hide();
 
-                if let Some(window) = keyboard_focused_window {
+                let target = state.grabbed_popups.last().cloned().or(leaving_window);
+                if let Some(window) = target {
                     if let Some(ref mut compose) = state.compose_state {
                         compose.reset();
                     }
@@ -2130,7 +2182,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 group,
                 ..
             } => {
-                let focused_window = state.keyboard_focused_window.clone();
+                let focused_window = state.keyboard_target();
 
                 let keymap_state = state.keymap_state.as_mut().unwrap();
                 let old_layout =
@@ -2164,7 +2216,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     state.serial_tracker.update(SerialKind::KeyPress, serial);
                 }
 
-                let focused_window = state.keyboard_focused_window.clone();
+                let focused_window = state.keyboard_target();
                 let Some(focused_window) = focused_window else {
                     return;
                 };
@@ -2240,16 +2292,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                 move |event_timestamp, _metadata, this| {
                                     let client = this.get_client();
                                     let state = client.borrow();
+                                    let focused_window = state.keyboard_target();
                                     let is_repeating = id == state.repeat.current_id
-                                        && state.repeat.current_keycode.is_some()
-                                        && state.keyboard_focused_window.is_some();
+                                        && state.repeat.current_keycode.is_some();
 
-                                    if !is_repeating || rate == 0 {
+                                    let Some(focused_window) =
+                                        focused_window.filter(|_| is_repeating && rate != 0)
+                                    else {
                                         return TimeoutAction::Drop;
-                                    }
-
-                                    let focused_window =
-                                        state.keyboard_focused_window.as_ref().unwrap().clone();
+                                    };
 
                                     drop(state);
                                     focused_window.handle_input(input.clone());
