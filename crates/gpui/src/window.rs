@@ -1755,9 +1755,12 @@ impl Window {
                 let force_render =
                     mem::take(&mut deferred_force_render) || request_frame_options.force_render;
 
-                let thermal_state = handle
-                    .update(&mut cx, |_, _, cx| cx.thermal_state())
-                    .log_err();
+                // We can still get callbacks after the window is closed, so we bail here instead of
+                // logging an error.
+                let Ok(thermal_state) = handle.update(&mut cx, |_, _, cx| cx.thermal_state())
+                else {
+                    return;
+                };
 
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
@@ -1769,7 +1772,7 @@ impl Window {
                     None
                 } else if !active.get() && !input_rate_tracker.borrow_mut().is_high_rate() {
                     inactive_frame_interval.map(|interval| (interval, FrameRateLimit::Inactive))
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
+                } else if let ThermalState::Critical | ThermalState::Serious = thermal_state {
                     Some((Duration::from_micros(16667), FrameRateLimit::Thermal))
                 } else {
                     None
