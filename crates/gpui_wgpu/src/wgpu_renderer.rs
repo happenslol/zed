@@ -943,6 +943,11 @@ impl WgpuRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        // Bail if window doesn't exist anymore
+        if self.resources.is_none() {
+            return;
+        }
+
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
 
@@ -1024,6 +1029,11 @@ impl WgpuRenderer {
     }
 
     pub fn update_transparency(&mut self, transparent: bool) {
+        // Bail if window doesn't exist anymore
+        if self.resources.is_none() {
+            return;
+        }
+
         let new_alpha_mode = if transparent {
             self.transparent_alpha_mode
         } else {
@@ -1763,6 +1773,10 @@ impl WgpuRenderer {
         // Release surface-bound GPU resources eagerly so the underlying native
         // window can be destroyed before the renderer itself is dropped.
         self.resources.take();
+
+        // Mark the surface unconfigured so a `draw()` that races the teardown
+        // short-circuits instead of touching the now-released resources.
+        self.surface_configured = false;
 
         // Atlas is shared and managed by WgpuContext.
         // Other wgpu resources are automatically cleaned up when dropped.
