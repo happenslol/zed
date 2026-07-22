@@ -748,6 +748,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_input_passthrough(&self) {}
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     fn reset_input_region(&self) {}
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn set_keyboard_interactivity(&self, _interactivity: layer_shell::KeyboardInteractivity) {}
 
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {

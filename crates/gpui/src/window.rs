@@ -2247,6 +2247,17 @@ impl Window {
         self.platform_window.reset_input_region();
     }
 
+    /// Updates the layer-shell keyboard interactivity mode. Only has an effect if the window is a
+    /// layer-shell surface.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_keyboard_interactivity(
+        &self,
+        interactivity: crate::layer_shell::KeyboardInteractivity,
+    ) {
+        self.platform_window
+            .set_keyboard_interactivity(interactivity);
+    }
+
     /// Sets the window background appearance.
     pub fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.platform_window
