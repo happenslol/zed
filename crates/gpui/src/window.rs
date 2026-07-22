@@ -2445,6 +2445,17 @@ impl Window {
         self.platform_window.set_exclusive_edge(edge);
     }
 
+    /// Updates the layer-shell keyboard interactivity mode. Only has an effect if the window is a
+    /// layer-shell surface.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_keyboard_interactivity(
+        &self,
+        interactivity: crate::layer_shell::KeyboardInteractivity,
+    ) {
+        self.platform_window
+            .set_keyboard_interactivity(interactivity);
+    }
+
     /// Start an interactive window resize operation if this window is resizable.
     pub fn start_window_resize(&self, edge: ResizeEdge) {
         if self.is_resizable {
