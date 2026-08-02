@@ -213,6 +213,69 @@ impl LineWrapper {
         }
     }
 
+    /// Truncate a line of text so that, once wrapped to `wrap_width`, it occupies
+    /// at most `max_lines` lines and ends with `truncation_affix`.
+    ///
+    /// This cannot be expressed as [`Self::truncate_line`] against a budget of
+    /// `wrap_width * max_lines`: wrapping breaks at word boundaries and so leaves
+    /// part of every line unused, meaning the same glyphs need more than that
+    /// budget once laid out. Text sized to it therefore still wraps past
+    /// `max_lines`, taking the affix out of sight with it. Truncating against the
+    /// wrap boundaries instead puts the affix on the last visible line.
+    pub fn truncate_wrapped_line<'a>(
+        &mut self,
+        line: SharedString,
+        wrap_width: Pixels,
+        max_lines: usize,
+        truncation_affix: &str,
+        runs: &'a [TextRun],
+    ) -> (SharedString, Cow<'a, [TextRun]>) {
+        // `wrap_line` yields one boundary per break, so the boundary starting the
+        // last line that survives the clamp is `max_lines - 2` (line one starts at
+        // index zero), and the text only needs truncating if a further boundary
+        // follows it.
+        let Some((last_line_start, indent)) = ({
+            let fragments = [LineFragment::text(&line)];
+            let mut boundaries = self
+                .wrap_line(&fragments, wrap_width)
+                .skip(max_lines.saturating_sub(2));
+
+            let last_line = if max_lines <= 1 {
+                Some((0, 0))
+            } else {
+                boundaries
+                    .next()
+                    .map(|boundary| (boundary.ix, boundary.next_indent))
+            };
+
+            last_line.filter(|_| boundaries.next().is_some())
+        }) else {
+            return (line, Cow::Borrowed(runs));
+        };
+
+        // The clamped line is laid out behind its indent, which is that much less
+        // width for the text and affix to share.
+        let indent_width = self.width_for_char(' ') * indent as f32;
+        let available_width = (wrap_width - indent_width).max(px(0.));
+
+        let Some(truncate_ix) = self.should_truncate_line(
+            &line[last_line_start..],
+            available_width,
+            truncation_affix,
+            TruncateFrom::End,
+        ) else {
+            return (line, Cow::Borrowed(runs));
+        };
+
+        let result = SharedString::from(format!(
+            "{}{truncation_affix}",
+            &line[..last_line_start + truncate_ix]
+        ));
+        let mut runs = runs.to_vec();
+        update_runs_after_truncation(&result, truncation_affix, &mut runs, TruncateFrom::End);
+        (result, Cow::Owned(runs))
+    }
+
     /// Any character in this list should be treated as a word character,
     /// meaning it can be part of a word that should not be wrapped.
     pub(crate) fn is_word_char(c: char) -> bool {
@@ -644,6 +707,79 @@ mod tests {
             "aaaa bbbb cccc 🦀🦀🦀🦀🦀 eeee fff gg",
             "…🦀🦀🦀🦀 eeee fff gg",
             "…",
+        );
+    }
+
+    #[test]
+    fn test_truncate_wrapped_line() {
+        let mut wrapper = build_wrapper();
+
+        #[track_caller]
+        fn perform_test(
+            wrapper: &mut LineWrapper,
+            text: &'static str,
+            wrap_width: Pixels,
+            max_lines: usize,
+            expected: &'static str,
+        ) {
+            let dummy_runs = generate_test_runs(&[text.len()]);
+            let (result, dummy_runs) =
+                wrapper.truncate_wrapped_line(text.into(), wrap_width, max_lines, "…", &dummy_runs);
+            assert_eq!(result, expected);
+            assert_eq!(dummy_runs.first().unwrap().len, result.len());
+
+            // What is kept has to fit within the clamp. Truncating against a
+            // `wrap_width * max_lines` budget does not achieve this, and wraps the
+            // affix out of sight.
+            let lines = wrapper
+                .wrap_line(&[LineFragment::text(&result)], wrap_width)
+                .count()
+                + 1;
+            assert!(lines <= max_lines, "{result:?} wrapped onto {lines} lines");
+        }
+
+        // Seven characters to a line at this width.
+        let wrap_width = px(72.);
+
+        // Short enough to fit the clamp; left alone.
+        perform_test(&mut wrapper, "aa bbb cccc", wrap_width, 3, "aa bbb cccc");
+        // Exactly `max_lines` lines is still a fit.
+        perform_test(
+            &mut wrapper,
+            "aa bbb cccc ddddd",
+            wrap_width,
+            3,
+            "aa bbb cccc ddddd",
+        );
+        perform_test(
+            &mut wrapper,
+            "aa bbb cccc ddddd eeee ffff gggg",
+            wrap_width,
+            3,
+            "aa bbb cccc ddddd …",
+        );
+        perform_test(
+            &mut wrapper,
+            "aa bbb cccc ddddd eeee ffff gggg",
+            wrap_width,
+            1,
+            "aa bbb…",
+        );
+        // A word longer than the wrap width is broken mid-word, by both the
+        // wrapping and the truncation.
+        perform_test(
+            &mut wrapper,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            wrap_width,
+            2,
+            "aaaaaaaaaaaaa…",
+        );
+        perform_test(
+            &mut wrapper,
+            "aa bbb cccc 🦀🦀🦀🦀🦀 eeee ffff",
+            wrap_width,
+            3,
+            "aa bbb cccc 🦀🦀🦀🦀…",
         );
     }
 

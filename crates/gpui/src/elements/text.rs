@@ -426,10 +426,7 @@ impl TextLayout {
                 let (truncate_width, truncation_affix, truncate_from) =
                     if let Some(text_overflow) = text_style.text_overflow.clone() {
                         let width = known_dimensions.width.or(match available_space.width {
-                            crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
-                                Some(max_lines) => Some(x * max_lines),
-                                None => Some(x),
-                            },
+                            crate::AvailableSpace::Definite(x) => Some(x),
                             _ => None,
                         });
 
@@ -455,16 +452,29 @@ impl TextLayout {
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                let (text, runs) = if let Some(truncate_width) = truncate_width {
-                    line_wrapper.truncate_line(
+                let (text, runs) = match (truncate_width, wrap_width, text_style.line_clamp) {
+                    // Wrapping text that is clamped to a number of lines has to be
+                    // truncated against those lines, so that the affix lands on the
+                    // last one that is still visible rather than past the clamp.
+                    (Some(_), Some(wrap_width), Some(max_lines))
+                        if truncate_from == TruncateFrom::End =>
+                    {
+                        line_wrapper.truncate_wrapped_line(
+                            text.clone(),
+                            wrap_width,
+                            max_lines,
+                            &truncation_affix,
+                            &runs,
+                        )
+                    }
+                    (Some(truncate_width), ..) => line_wrapper.truncate_line(
                         text.clone(),
                         truncate_width,
                         &truncation_affix,
                         &runs,
                         truncate_from,
-                    )
-                } else {
-                    (text.clone(), Cow::Borrowed(&*runs))
+                    ),
+                    (None, ..) => (text.clone(), Cow::Borrowed(&*runs)),
                 };
                 let len = text.len();
 
